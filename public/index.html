@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Itinerary Planner</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="page">
+    <h1>Itinerary Planner</h1>
+    <p>Plan a trip, track what it costs, share it with everyone coming along.</p>
+  </header>
+
+  <div class="card">
+    <h2>New trip</h2>
+    <form id="new-trip">
+      <div class="grid">
+        <div class="field">
+          <label for="name">Trip name</label>
+          <input id="name" name="name" required placeholder="Nepal, October">
+        </div>
+        <div class="field">
+          <label for="destination">Destination</label>
+          <input id="destination" name="destination" placeholder="Kathmandu &amp; Pokhara">
+        </div>
+        <div class="field">
+          <label for="startDate">Start date</label>
+          <input id="startDate" name="startDate" type="date">
+        </div>
+        <div class="field">
+          <label for="endDate">End date</label>
+          <input id="endDate" name="endDate" type="date">
+        </div>
+      </div>
+      <div style="margin-top:14px">
+        <button type="submit">Create trip</button>
+      </div>
+      <div class="error" id="new-trip-error"></div>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Your trips</h2>
+    <div id="trip-list"><p class="empty">Loading…</p></div>
+  </div>
+</div>
+
+<script type="module">
+import { money, el } from '/app.js';
+
+const list = document.getElementById('trip-list');
+
+async function refresh() {
+  const res = await fetch('/api/trips');
+  const trips = await res.json();
+
+  list.replaceChildren();
+  if (!trips.length) {
+    list.append(el('p', { class: 'empty' }, 'No trips yet. Create one above.'));
+    return;
+  }
+
+  for (const trip of trips) {
+    const dates = [trip.startDate, trip.endDate].filter(Boolean).join(' → ');
+    // Owner opens with the edit token; the view token is what gets shared out.
+    const link = el('a', { class: 'trip-link row', href: `/t/${trip.editToken}` },
+      el('div', { class: 'row-main' },
+        el('div', { class: 'row-title' }, trip.name),
+        el('div', { class: 'row-meta' }, [trip.destination, dates].filter(Boolean).join(' · ') || 'No dates set')
+      ),
+      el('div', { class: 'row-side' },
+        el('div', { class: 'amount' }, money(trip.totalCents, trip.currency))
+      )
+    );
+    list.append(link);
+  }
+}
+
+document.getElementById('new-trip').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.target;
+  const errorBox = document.getElementById('new-trip-error');
+  errorBox.textContent = '';
+
+  const body = Object.fromEntries(new FormData(form).entries());
+  const res = await fetch('/api/trips', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const { error } = await res.json().catch(() => ({ error: 'Could not create trip' }));
+    errorBox.textContent = error;
+    return;
+  }
+
+  const trip = await res.json();
+  window.location.href = `/t/${trip.editToken}`;
+});
+
+refresh();
+</script>
+</body>
+</html>

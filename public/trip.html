@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trip · Itinerary Planner</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="page">
+    <h1 id="trip-name">Loading…</h1>
+    <p id="trip-sub"></p>
+  </header>
+  <div id="content"></div>
+</div>
+
+<script type="module">
+import { api, money, el } from '/app.js';
+
+const token = window.location.pathname.split('/').pop();
+const content = document.getElementById('content');
+let trip = null;
+
+function card(title, ...children) {
+  return el('div', { class: 'card' }, el('h2', {}, title), ...children);
+}
+
+// A row of labelled inputs plus a submit button, used for each add-item form.
+function addForm(collection, fields, onDone) {
+  const inputs = {};
+  const grid = el('div', { class: 'grid' });
+
+  for (const field of fields) {
+    const input = el('input', {
+      type: field.type || 'text',
+      placeholder: field.placeholder || '',
+      ...(field.step ? { step: field.step } : {}),
+    });
+    inputs[field.key] = input;
+    grid.append(el('div', { class: 'field' }, el('label', {}, field.label), input));
+  }
+
+  // "Paid by" is a select over current travellers, so costs attach to a person.
+  let payer = null;
+  if (fields.some((f) => f.key === 'cost') && trip.travellers.length) {
+    payer = el('select', {});
+    payer.append(el('option', { value: '' }, 'Paid by — unassigned'));
+    for (const traveller of trip.travellers) {
+      payer.append(el('option', { value: traveller.id }, traveller.name));
+    }
+    grid.append(el('div', { class: 'field' }, el('label', {}, 'Paid by'), payer));
+  }
+
+  const errorBox = el('div', { class: 'error' });
+  const submit = el('button', { type: 'submit' }, 'Add');
+  const form = el('form', {}, grid, el('div', { style: 'margin-top:12px' }, submit), errorBox);
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    errorBox.textContent = '';
+    const body = {};
+    for (const [key, input] of Object.entries(inputs)) body[key] = input.value;
+    if (payer && payer.value) body.paidBy = payer.value;
+
+    submit.disabled = true;
+    try {
+      const updated = await api(`/api/trips/${token}/${collection}`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      onDone(updated);
+    } catch (err) {
+      errorBox.textContent = err.message;
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  return form;
+}
+
+function removeButton(collection, itemId) {
+  const button = el('button', { class: 'link', type: 'button' }, 'Remove');
+  button.addEventListener('click', async () => {
+    try {
+      render(await api(`/api/trips/${token}/${collection}/${itemId}`, { method: 'DELETE' }));
+    } catch (err) {
+      alert(err.message);
+    }
+  });
+  return button;
+}
+
+function mapLink(url) {
+  if (!url) return null;
+  return el('a', { class: 'maplink', href: url, target: '_blank', rel: 'noopener noreferrer' }, 'Open map ↗');
+}
+
+function payerName(id) {
+  const match = trip.travellers.find((t) => t.id === id);
+  return match ? match.name : null;
+}
+
+function render(data) {
+  trip = data;
+  document.getElementById('trip-name').textContent = trip.name;
+  document.title = `${trip.name} · Itinerary Planner`;
+
+  const dates = [trip.startDate, trip.endDate].filter(Boolean).join(' → ');
+  document.getElementById('trip-sub').textContent =
+    [trip.destination, dates].filter(Boolean).join(' · ') || 'No dates set yet';
+
+  const sections = [];
+  const cur = trip.currency;
+
+  // --- Costs ---------------------------------------------------------------
+  const s = trip.summary;
+  const tiles = el('div', { class: 'totals' },
+    el('div', { class: 'total-tile' }, el('div', { class: 'k' }, 'Total'), el('div', { class: 'v' }, money(s.totalCents, cur))),
+    el('div', { class: 'total-tile' }, el('div', { class: 'k' }, 'Stays'), el('div', { class: 'v' }, money(s.stayCents, cur))),
+    el('div', { class: 'total-tile' }, el('div', { class: 'k' }, 'Activities'), el('div', { class: 'v' }, money(s.activityCents, cur))),
+    s.headcount > 0
+      ? el('div', { class: 'total-tile' }, el('div', { class: 'k' }, `Each (${s.headcount})`), el('div', { class: 'v' }, money(s.perPersonCents, cur)))
+      : null
+  );
+
+  const costChildren = [tiles];
+  if (s.balances.length) {
+    const balances = el('div', { style: 'margin-top:16px' });
+    for (const b of s.balances) {
+      const settled = b.netCents === 0;
+      const label = settled
+        ? 'settled up'
+        : b.netCents > 0
+          ? `is owed ${money(b.netCents, cur)}`
+          : `owes ${money(-b.netCents, cur)}`;
+      balances.append(
+        el('div', { class: 'row' },
+          el('div', { class: 'row-main' },
+            el('div', { class: 'row-title' }, b.name),
+            el('div', { class: 'row-meta' }, `paid ${money(b.paidCents, cur)} · share ${money(b.oweCents, cur)}`)
+          ),
+          el('div', { class: 'row-side' },
+            el('span', { class: settled ? 'row-meta' : b.netCents > 0 ? 'net-pos' : 'net-neg' }, label)
+          )
+        )
+      );
+    }
+    costChildren.push(balances);
+  }
+  sections.push(card('Costs', ...costChildren));
+
+  // --- Stays ---------------------------------------------------------------
+  const stayList = el('div');
+  if (!trip.stays.length) {
+    stayList.append(el('p', { class: 'empty' }, 'No stays added yet.'));
+  } else {
+    for (const stay of trip.stays) {
+      const meta = [stay.address, [stay.checkIn, stay.checkOut].filter(Boolean).join(' → ')]
+        .filter(Boolean).join(' · ');
+      const extra = [
+        stay.nights ? `${stay.nights} night${stay.nights === 1 ? '' : 's'}` : null,
+        stay.bookingRef ? `Ref ${stay.bookingRef}` : null,
+        payerName(stay.paidBy) ? `Paid by ${payerName(stay.paidBy)}` : null,
+      ].filter(Boolean).join(' · ');
+
+      stayList.append(
+        el('div', { class: 'row' },
+          el('div', { class: 'row-main' },
+            el('div', { class: 'row-title' }, stay.name),
+            meta ? el('div', { class: 'row-meta' }, meta) : null,
+            extra ? el('div', { class: 'row-meta' }, extra) : null,
+            stay.notes ? el('div', { class: 'row-meta' }, stay.notes) : null,
+            mapLink(stay.mapUrl)
+          ),
+          el('div', { class: 'row-side' },
+            el('div', { class: 'amount' }, money(Math.round(Number(stay.cost || 0) * 100), cur)),
+            trip.canEdit ? removeButton('stays', stay.id) : null
+          )
+        )
+      );
+    }
+  }
+
+  const stayChildren = [stayList];
+  if (trip.canEdit) {
+    stayChildren.push(el('div', { style: 'margin-top:16px' },
+      addForm('stays', [
+        { key: 'name', label: 'Hotel / place', placeholder: 'Hotel Yak & Yeti' },
+        { key: 'address', label: 'Address', placeholder: 'Durbar Marg, Kathmandu' },
+        { key: 'checkIn', label: 'Check in', type: 'date' },
+        { key: 'checkOut', label: 'Check out', type: 'date' },
+        { key: 'cost', label: `Cost (${cur})`, type: 'number', step: '0.01', placeholder: '450.00' },
+        { key: 'bookingRef', label: 'Booking ref', placeholder: 'ABC123' },
+        { key: 'mapUrl', label: 'Map link', placeholder: 'https://maps.google.com/…' },
+      ], render)
+    ));
+  }
+  sections.push(card('Where you are staying', ...stayChildren));
+
+  // --- Activities ----------------------------------------------------------
+  const actList = el('div');
+  if (!trip.activities.length) {
+    actList.append(el('p', { class: 'empty' }, 'Nothing planned yet.'));
+  } else {
+    const sorted = [...trip.activities].sort((a, b) =>
+      `${a.date || '9999'}${a.time || ''}`.localeCompare(`${b.date || '9999'}${b.time || ''}`)
+    );
+    for (const act of sorted) {
+      const meta = [[act.date, act.time].filter(Boolean).join(' '), act.location]
+        .filter(Boolean).join(' · ');
+      actList.append(
+        el('div', { class: 'row' },
+          el('div', { class: 'row-main' },
+            el('div', { class: 'row-title' }, act.name),
+            meta ? el('div', { class: 'row-meta' }, meta) : null,
+            payerName(act.paidBy) ? el('div', { class: 'row-meta' }, `Paid by ${payerName(act.paidBy)}`) : null,
+            act.notes ? el('div', { class: 'row-meta' }, act.notes) : null,
+            mapLink(act.mapUrl)
+          ),
+          el('div', { class: 'row-side' },
+            el('div', { class: 'amount' }, money(Math.round(Number(act.cost || 0) * 100), cur)),
+            trip.canEdit ? removeButton('activities', act.id) : null
+          )
+        )
+      );
+    }
+  }
+
+  const actChildren = [actList];
+  if (trip.canEdit) {
+    actChildren.push(el('div', { style: 'margin-top:16px' },
+      addForm('activities', [
+        { key: 'name', label: 'Activity', placeholder: 'Everest scenic flight' },
+        { key: 'date', label: 'Date', type: 'date' },
+        { key: 'time', label: 'Time', type: 'time' },
+        { key: 'location', label: 'Location', placeholder: 'Tribhuvan Airport' },
+        { key: 'cost', label: `Cost (${cur})`, type: 'number', step: '0.01', placeholder: '220.00' },
+        { key: 'mapUrl', label: 'Map link', placeholder: 'https://maps.google.com/…' },
+      ], render)
+    ));
+  }
+  sections.push(card('Itinerary', ...actChildren));
+
+  // --- Travellers ----------------------------------------------------------
+  const travList = el('div');
+  if (!trip.travellers.length) {
+    travList.append(el('p', { class: 'empty' }, 'Add travellers to split costs between them.'));
+  } else {
+    for (const traveller of trip.travellers) {
+      travList.append(
+        el('div', { class: 'row' },
+          el('div', { class: 'row-main' },
+            el('div', { class: 'row-title' }, traveller.name),
+            traveller.email ? el('div', { class: 'row-meta' }, traveller.email) : null
+          ),
+          el('div', { class: 'row-side' }, trip.canEdit ? removeButton('travellers', traveller.id) : null)
+        )
+      );
+    }
+  }
+
+  const travChildren = [travList];
+  if (trip.canEdit) {
+    travChildren.push(el('div', { style: 'margin-top:16px' },
+      addForm('travellers', [
+        { key: 'name', label: 'Name', placeholder: 'Prabin' },
+        { key: 'email', label: 'Email (optional)', type: 'email', placeholder: 'name@example.com' },
+      ], render)
+    ));
+  }
+  sections.push(card('Travellers', ...travChildren));
+
+  // --- Sharing -------------------------------------------------------------
+  if (trip.canEdit) {
+    const origin = window.location.origin;
+    const shareRow = (label, url, hint) => {
+      const input = el('input', { readonly: 'readonly', value: url });
+      const copy = el('button', { class: 'ghost', type: 'button' }, 'Copy');
+      copy.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(url);
+        } catch {
+          // Clipboard API needs HTTPS and permission; selecting the text is a
+          // reliable fallback the user can finish with Cmd+C.
+          input.select();
+        }
+        copy.textContent = 'Copied';
+        setTimeout(() => { copy.textContent = 'Copy'; }, 1500);
+      });
+      return el('div', {},
+        el('label', {}, label),
+        el('div', { class: 'share' }, input, copy),
+        el('div', { class: 'row-meta', style: 'margin-bottom:16px' }, hint)
+      );
+    };
+
+    sections.push(card('Share this trip',
+      shareRow('Read-only link — send this to the group',
+        `${origin}/t/${trip.viewToken}`,
+        'Anyone with this link can see the itinerary and costs but cannot change anything.'),
+      shareRow('Edit link — keep this one to yourself',
+        `${origin}/t/${trip.editToken}`,
+        'Anyone with this link has full edit access, including deleting the trip.')
+    ));
+  } else {
+    sections.push(card('Access', el('span', { class: 'pill' }, 'Read-only'),
+      el('div', { class: 'row-meta', style: 'margin-top:8px' },
+        'You are viewing a shared itinerary. Ask the trip owner for an edit link to make changes.')));
+  }
+
+  content.replaceChildren(...sections);
+}
+
+api(`/api/trips/${token}`)
+  .then(render)
+  .catch((err) => {
+    document.getElementById('trip-name').textContent = 'Trip not found';
+    document.getElementById('trip-sub').textContent = err.message;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: itinerary-planner
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      # Set in the Render dashboard under Environment, not committed here.
+      # Use the Internal Database URL when the app and database share a region.
+      - key: DATABASE_URL
+        sync: false

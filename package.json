@@ -1,0 +1,20 @@
+{
+  "name": "itinerary-planner",
+  "version": "1.0.0",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --env-file=.env --watch src/server.js",
+    "test": "node --env-file=.env --test test/"
+  },
+  "license": "ISC",
+  "description": "Shareable trip itinerary planner with cost tracking",
+  "dependencies": {
+    "express": "^5.2.1",
+    "pg": "^8.22.0"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  }
+}
