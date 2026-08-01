@@ -97,6 +97,9 @@ button.link {
   background: none; border: none; color: var(--danger);
   padding: 2px 6px; font-size: 13px; font-weight: 500;
 }
+button.link.edit { color: var(--accent); }
+
+.form-actions { display: flex; gap: 8px; margin-top: 12px; }
 
 .row {
   display: flex;
@@ -111,6 +114,16 @@ button.link {
 .row-title { font-weight: 600; }
 .row-meta { color: var(--muted); font-size: 13px; margin-top: 2px; word-break: break-word; }
 .row-side { text-align: right; white-space: nowrap; }
+.row-actions { display: flex; gap: 2px; justify-content: flex-end; margin-top: 4px; }
+
+/* A row swapped out for its edit form: the form owns the full width. */
+.row-editing {
+  display: block;
+  background: var(--accent-soft);
+  border-radius: 8px;
+  padding: 14px;
+  margin: 8px 0;
+}
 .amount { font-variant-numeric: tabular-nums; font-weight: 600; }
 
 a { color: var(--accent); }
@@ -141,4 +154,5 @@ a { color: var(--accent); }
 @media (max-width: 560px) {
   .row { flex-direction: column; gap: 6px; }
   .row-side { text-align: left; }
+  .row-actions { justify-content: flex-start; margin-left: -6px; }
 }

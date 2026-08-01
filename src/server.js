@@ -160,6 +160,11 @@ app.patch('/api/trips/:token', resolve, requireEdit, async (req, res, next) => {
     for (const key of ['name', 'destination', 'startDate', 'endDate', 'notes', 'currency']) {
       if (key in req.body) fields[key] = cleanText(req.body[key], key === 'notes' ? 2000 : 120);
     }
+    // Every other field may be blanked, but a nameless trip has nothing to show
+    // in the heading or the index, so an empty name is rejected rather than saved.
+    if ('name' in fields && !fields.name) {
+      return res.status(400).json({ error: 'Trip name is required' });
+    }
     const trip = await store.updateTrip(req.trip.id, fields);
     res.json(present(trip, true));
   } catch (err) {

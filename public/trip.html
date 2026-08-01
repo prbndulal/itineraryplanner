@@ -22,12 +22,50 @@ const token = window.location.pathname.split('/').pop();
 const content = document.getElementById('content');
 let trip = null;
 
+// Which row is open in its editor: { collection, id }, or null when nothing is
+// being edited. render() draws that one row as a form instead of a summary
+// line, so opening and closing an editor is a state change plus a re-render
+// rather than hand-patching the DOM.
+let editing = null;
+
 function card(title, ...children) {
   return el('div', { class: 'card' }, el('h2', {}, title), ...children);
 }
 
-// A row of labelled inputs plus a submit button, used for each add-item form.
-function addForm(collection, fields, onDone) {
+// The same field list drives the add form and the edit form for a collection,
+// so anything that can be created can also be changed afterwards.
+function fieldsFor(collection, cur) {
+  if (collection === 'stays') {
+    return [
+      { key: 'name', label: 'Hotel / place', placeholder: 'Hotel Yak & Yeti' },
+      { key: 'address', label: 'Address', placeholder: 'Durbar Marg, Kathmandu' },
+      { key: 'checkIn', label: 'Check in', type: 'date' },
+      { key: 'checkOut', label: 'Check out', type: 'date' },
+      { key: 'cost', label: `Cost (${cur})`, type: 'number', step: '0.01', placeholder: '450.00' },
+      { key: 'bookingRef', label: 'Booking ref', placeholder: 'ABC123' },
+      { key: 'mapUrl', label: 'Map link', placeholder: 'https://maps.google.com/…' },
+    ];
+  }
+  if (collection === 'activities') {
+    return [
+      { key: 'name', label: 'Activity', placeholder: 'Everest scenic flight' },
+      { key: 'date', label: 'Date', type: 'date' },
+      { key: 'time', label: 'Time', type: 'time' },
+      { key: 'location', label: 'Location', placeholder: 'Tribhuvan Airport' },
+      { key: 'cost', label: `Cost (${cur})`, type: 'number', step: '0.01', placeholder: '220.00' },
+      { key: 'mapUrl', label: 'Map link', placeholder: 'https://maps.google.com/…' },
+    ];
+  }
+  return [
+    { key: 'name', label: 'Name', placeholder: 'Prabin' },
+    { key: 'email', label: 'Email (optional)', type: 'email', placeholder: 'name@example.com' },
+  ];
+}
+
+// A row of labelled inputs plus a submit button. With `item` it edits that item
+// in place (PATCH); without one it adds a new item (POST).
+function itemForm(collection, { item = null, onCancel = null } = {}) {
+  const fields = fieldsFor(collection, trip.currency);
   const inputs = {};
   const grid = el('div', { class: 'grid' });
 
@@ -35,6 +73,7 @@ function addForm(collection, fields, onDone) {
     const input = el('input', {
       type: field.type || 'text',
       placeholder: field.placeholder || '',
+      value: item ? (item[field.key] ?? '') : '',
       ...(field.step ? { step: field.step } : {}),
     });
     inputs[field.key] = input;
@@ -49,30 +88,45 @@ function addForm(collection, fields, onDone) {
     for (const traveller of trip.travellers) {
       payer.append(el('option', { value: traveller.id }, traveller.name));
     }
+    // Set after the options exist, otherwise the value has nothing to match.
+    payer.value = (item && item.paidBy) || '';
     grid.append(el('div', { class: 'field' }, el('label', {}, 'Paid by'), payer));
   }
 
   const errorBox = el('div', { class: 'error' });
-  const submit = el('button', { type: 'submit' }, 'Add');
-  const form = el('form', {}, grid, el('div', { style: 'margin-top:12px' }, submit), errorBox);
+  const submit = el('button', { type: 'submit' }, item ? 'Save' : 'Add');
+  const buttons = el('div', { class: 'form-actions' }, submit);
+
+  if (onCancel) {
+    const cancel = el('button', { class: 'ghost', type: 'button' }, 'Cancel');
+    cancel.addEventListener('click', onCancel);
+    buttons.append(cancel);
+  }
+
+  const form = el('form', {}, grid, buttons, errorBox);
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     errorBox.textContent = '';
     const body = {};
     for (const [key, input] of Object.entries(inputs)) body[key] = input.value;
-    if (payer && payer.value) body.paidBy = payer.value;
+    // Always sent, so an existing payer can be reassigned or cleared.
+    if (payer) body.paidBy = payer.value;
+
+    const path = item
+      ? `/api/trips/${token}/${collection}/${item.id}`
+      : `/api/trips/${token}/${collection}`;
 
     submit.disabled = true;
     try {
-      const updated = await api(`/api/trips/${token}/${collection}`, {
-        method: 'POST',
+      const updated = await api(path, {
+        method: item ? 'PATCH' : 'POST',
         body: JSON.stringify(body),
       });
-      onDone(updated);
+      editing = null;
+      render(updated);
     } catch (err) {
       errorBox.textContent = err.message;
-    } finally {
       submit.disabled = false;
     }
   });
@@ -80,16 +134,48 @@ function addForm(collection, fields, onDone) {
   return form;
 }
 
+function isEditing(collection, itemId) {
+  return editing !== null && editing.collection === collection && editing.id === itemId;
+}
+
+function editRow(collection, item) {
+  return el('div', { class: 'row row-editing' },
+    itemForm(collection, {
+      item,
+      onCancel: () => { editing = null; render(trip); },
+    })
+  );
+}
+
+function editButton(collection, itemId) {
+  const button = el('button', { class: 'link edit', type: 'button' }, 'Edit');
+  button.addEventListener('click', () => {
+    editing = { collection, id: itemId };
+    render(trip);
+  });
+  return button;
+}
+
 function removeButton(collection, itemId) {
   const button = el('button', { class: 'link', type: 'button' }, 'Remove');
   button.addEventListener('click', async () => {
     try {
-      render(await api(`/api/trips/${token}/${collection}/${itemId}`, { method: 'DELETE' }));
+      const updated = await api(`/api/trips/${token}/${collection}/${itemId}`, { method: 'DELETE' });
+      if (isEditing(collection, itemId)) editing = null;
+      render(updated);
     } catch (err) {
       alert(err.message);
     }
   });
   return button;
+}
+
+function rowActions(collection, itemId) {
+  if (!trip.canEdit) return null;
+  return el('div', { class: 'row-actions' },
+    editButton(collection, itemId),
+    removeButton(collection, itemId)
+  );
 }
 
 function mapLink(url) {
@@ -100,6 +186,69 @@ function mapLink(url) {
 function payerName(id) {
   const match = trip.travellers.find((t) => t.id === id);
   return match ? match.name : null;
+}
+
+// Trip-level details: name, destination, dates, currency, notes.
+function tripForm() {
+  const inputs = {
+    name: el('input', { value: trip.name, required: 'required', placeholder: 'Nepal, October' }),
+    destination: el('input', { value: trip.destination, placeholder: 'Kathmandu & Pokhara' }),
+    startDate: el('input', { type: 'date', value: trip.startDate }),
+    endDate: el('input', { type: 'date', value: trip.endDate }),
+    currency: el('input', { value: trip.currency, maxlength: '3', placeholder: 'USD' }),
+  };
+
+  const labels = {
+    name: 'Trip name',
+    destination: 'Destination',
+    startDate: 'Start date',
+    endDate: 'End date',
+    currency: 'Currency',
+  };
+
+  const grid = el('div', { class: 'grid' });
+  for (const [key, input] of Object.entries(inputs)) {
+    grid.append(el('div', { class: 'field' }, el('label', {}, labels[key]), input));
+  }
+
+  const notes = el('textarea', { placeholder: 'Flight numbers, packing list, anything else…' }, trip.notes);
+  const errorBox = el('div', { class: 'error' });
+  const submit = el('button', { id: 'save-details', type: 'submit' }, 'Save details');
+
+  const form = el('form', {},
+    grid,
+    el('div', { style: 'margin-top:12px' }, el('label', {}, 'Notes'), notes),
+    el('div', { class: 'form-actions' }, submit),
+    errorBox
+  );
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    errorBox.textContent = '';
+    const body = { notes: notes.value };
+    for (const [key, input] of Object.entries(inputs)) body[key] = input.value;
+
+    submit.disabled = true;
+    try {
+      const updated = await api(`/api/trips/${token}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      });
+      // render() replaces this form with a fresh one, so the confirmation has to
+      // land on the new button rather than the node this handler closed over.
+      render(updated);
+      const saved = document.getElementById('save-details');
+      if (saved) {
+        saved.textContent = 'Saved';
+        setTimeout(() => { saved.textContent = 'Save details'; }, 1500);
+      }
+    } catch (err) {
+      errorBox.textContent = err.message;
+      submit.disabled = false;
+    }
+  });
+
+  return form;
 }
 
 function render(data) {
@@ -113,6 +262,13 @@ function render(data) {
 
   const sections = [];
   const cur = trip.currency;
+
+  // --- Trip details --------------------------------------------------------
+  if (trip.canEdit) {
+    sections.push(card('Trip details', tripForm()));
+  } else if (trip.notes) {
+    sections.push(card('Notes', el('div', { class: 'row-meta' }, trip.notes)));
+  }
 
   // --- Costs ---------------------------------------------------------------
   const s = trip.summary;
@@ -157,6 +313,11 @@ function render(data) {
     stayList.append(el('p', { class: 'empty' }, 'No stays added yet.'));
   } else {
     for (const stay of trip.stays) {
+      if (isEditing('stays', stay.id)) {
+        stayList.append(editRow('stays', stay));
+        continue;
+      }
+
       const meta = [stay.address, [stay.checkIn, stay.checkOut].filter(Boolean).join(' → ')]
         .filter(Boolean).join(' · ');
       const extra = [
@@ -176,7 +337,7 @@ function render(data) {
           ),
           el('div', { class: 'row-side' },
             el('div', { class: 'amount' }, money(Math.round(Number(stay.cost || 0) * 100), cur)),
-            trip.canEdit ? removeButton('stays', stay.id) : null
+            rowActions('stays', stay.id)
           )
         )
       );
@@ -185,17 +346,7 @@ function render(data) {
 
   const stayChildren = [stayList];
   if (trip.canEdit) {
-    stayChildren.push(el('div', { style: 'margin-top:16px' },
-      addForm('stays', [
-        { key: 'name', label: 'Hotel / place', placeholder: 'Hotel Yak & Yeti' },
-        { key: 'address', label: 'Address', placeholder: 'Durbar Marg, Kathmandu' },
-        { key: 'checkIn', label: 'Check in', type: 'date' },
-        { key: 'checkOut', label: 'Check out', type: 'date' },
-        { key: 'cost', label: `Cost (${cur})`, type: 'number', step: '0.01', placeholder: '450.00' },
-        { key: 'bookingRef', label: 'Booking ref', placeholder: 'ABC123' },
-        { key: 'mapUrl', label: 'Map link', placeholder: 'https://maps.google.com/…' },
-      ], render)
-    ));
+    stayChildren.push(el('div', { style: 'margin-top:16px' }, itemForm('stays')));
   }
   sections.push(card('Where you are staying', ...stayChildren));
 
@@ -208,6 +359,11 @@ function render(data) {
       `${a.date || '9999'}${a.time || ''}`.localeCompare(`${b.date || '9999'}${b.time || ''}`)
     );
     for (const act of sorted) {
+      if (isEditing('activities', act.id)) {
+        actList.append(editRow('activities', act));
+        continue;
+      }
+
       const meta = [[act.date, act.time].filter(Boolean).join(' '), act.location]
         .filter(Boolean).join(' · ');
       actList.append(
@@ -221,7 +377,7 @@ function render(data) {
           ),
           el('div', { class: 'row-side' },
             el('div', { class: 'amount' }, money(Math.round(Number(act.cost || 0) * 100), cur)),
-            trip.canEdit ? removeButton('activities', act.id) : null
+            rowActions('activities', act.id)
           )
         )
       );
@@ -230,16 +386,7 @@ function render(data) {
 
   const actChildren = [actList];
   if (trip.canEdit) {
-    actChildren.push(el('div', { style: 'margin-top:16px' },
-      addForm('activities', [
-        { key: 'name', label: 'Activity', placeholder: 'Everest scenic flight' },
-        { key: 'date', label: 'Date', type: 'date' },
-        { key: 'time', label: 'Time', type: 'time' },
-        { key: 'location', label: 'Location', placeholder: 'Tribhuvan Airport' },
-        { key: 'cost', label: `Cost (${cur})`, type: 'number', step: '0.01', placeholder: '220.00' },
-        { key: 'mapUrl', label: 'Map link', placeholder: 'https://maps.google.com/…' },
-      ], render)
-    ));
+    actChildren.push(el('div', { style: 'margin-top:16px' }, itemForm('activities')));
   }
   sections.push(card('Itinerary', ...actChildren));
 
@@ -249,13 +396,18 @@ function render(data) {
     travList.append(el('p', { class: 'empty' }, 'Add travellers to split costs between them.'));
   } else {
     for (const traveller of trip.travellers) {
+      if (isEditing('travellers', traveller.id)) {
+        travList.append(editRow('travellers', traveller));
+        continue;
+      }
+
       travList.append(
         el('div', { class: 'row' },
           el('div', { class: 'row-main' },
             el('div', { class: 'row-title' }, traveller.name),
             traveller.email ? el('div', { class: 'row-meta' }, traveller.email) : null
           ),
-          el('div', { class: 'row-side' }, trip.canEdit ? removeButton('travellers', traveller.id) : null)
+          el('div', { class: 'row-side' }, rowActions('travellers', traveller.id))
         )
       );
     }
@@ -263,12 +415,7 @@ function render(data) {
 
   const travChildren = [travList];
   if (trip.canEdit) {
-    travChildren.push(el('div', { style: 'margin-top:16px' },
-      addForm('travellers', [
-        { key: 'name', label: 'Name', placeholder: 'Prabin' },
-        { key: 'email', label: 'Email (optional)', type: 'email', placeholder: 'name@example.com' },
-      ], render)
-    ));
+    travChildren.push(el('div', { style: 'margin-top:16px' }, itemForm('travellers')));
   }
   sections.push(card('Travellers', ...travChildren));
 

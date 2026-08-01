@@ -150,6 +150,120 @@ test('items can be removed', async () => {
   assert.equal(removed.body.summary.totalCents, 0);
 });
 
+test('editing an item updates it and recomputes costs', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  const added = await call('POST', `/api/trips/${t}/stays`, {
+    name: 'Hotel Yak & Yeti',
+    checkIn: '2026-10-01',
+    checkOut: '2026-10-04',
+    cost: '450.00',
+  });
+  const stayId = added.body.stays[0].id;
+
+  const edited = await call('PATCH', `/api/trips/${t}/stays/${stayId}`, {
+    name: 'Hotel Shanker',
+    checkIn: '2026-10-01',
+    checkOut: '2026-10-03',
+    cost: '300.00',
+  });
+
+  assert.equal(edited.status, 200);
+  const stay = edited.body.stays[0];
+  assert.equal(edited.body.stays.length, 1, 'editing must not create a second row');
+  assert.equal(stay.id, stayId);
+  assert.equal(stay.name, 'Hotel Shanker');
+  assert.equal(stay.nights, 2);
+  assert.equal(edited.body.summary.stayCents, 30000);
+});
+
+test('editing can clear a field and reassign who paid', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  const traveller = await call('POST', `/api/trips/${t}/travellers`, { name: 'Prabin' });
+  const prabinId = traveller.body.travellers[0].id;
+
+  const added = await call('POST', `/api/trips/${t}/stays`, {
+    name: 'Hotel',
+    bookingRef: 'ABC123',
+    cost: '100.00',
+    paidBy: prabinId,
+  });
+  const stayId = added.body.stays[0].id;
+
+  const edited = await call('PATCH', `/api/trips/${t}/stays/${stayId}`, {
+    name: 'Hotel',
+    bookingRef: '',
+    paidBy: '',
+  });
+
+  assert.equal(edited.body.stays[0].bookingRef, '');
+  assert.equal(edited.body.stays[0].paidBy, '');
+  assert.equal(edited.body.summary.balances[0].paidCents, 0, 'the payer was cleared');
+});
+
+test('an edit is rejected when it would leave an item unnamed', async () => {
+  const trip = await makeTrip();
+  const added = await call('POST', `/api/trips/${trip.editToken}/activities`, { name: 'Everest flight' });
+  const itemId = added.body.activities[0].id;
+
+  const res = await call('PATCH', `/api/trips/${trip.editToken}/activities/${itemId}`, { name: '  ' });
+  assert.equal(res.status, 400);
+
+  const unchanged = await call('GET', `/api/trips/${trip.editToken}`);
+  assert.equal(unchanged.body.activities[0].name, 'Everest flight');
+});
+
+test('editing an unknown item is a 404', async () => {
+  const trip = await makeTrip();
+  const res = await call('PATCH', `/api/trips/${trip.editToken}/stays/no-such-item`, { name: 'Ghost' });
+  assert.equal(res.status, 404);
+});
+
+test('an item cannot be edited through a different trip token', async () => {
+  const tripA = await makeTrip('Trip A');
+  const tripB = await makeTrip('Trip B');
+
+  const added = await call('POST', `/api/trips/${tripA.editToken}/stays`, { name: 'A Hotel' });
+  const itemId = added.body.stays[0].id;
+
+  const cross = await call('PATCH', `/api/trips/${tripB.editToken}/stays/${itemId}`, { name: 'Hijacked' });
+  assert.equal(cross.status, 404, "trip B must not reach trip A's items");
+
+  const unchanged = await call('GET', `/api/trips/${tripA.editToken}`);
+  assert.equal(unchanged.body.stays[0].name, 'A Hotel');
+});
+
+test('trip details can be edited', async () => {
+  const trip = await makeTrip('Draft');
+  const res = await call('PATCH', `/api/trips/${trip.editToken}`, {
+    name: 'Nepal, October',
+    destination: 'Kathmandu & Pokhara',
+    startDate: '2026-10-01',
+    endDate: '2026-10-14',
+    currency: 'NPR',
+    notes: 'Bring a warm jacket.',
+  });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.name, 'Nepal, October');
+  assert.equal(res.body.destination, 'Kathmandu & Pokhara');
+  assert.equal(res.body.startDate, '2026-10-01');
+  assert.equal(res.body.currency, 'NPR');
+  assert.equal(res.body.notes, 'Bring a warm jacket.');
+});
+
+test('a trip cannot be renamed to nothing', async () => {
+  const trip = await makeTrip('Keeps Its Name');
+  const res = await call('PATCH', `/api/trips/${trip.editToken}`, { name: '   ' });
+  assert.equal(res.status, 400);
+
+  const unchanged = await call('GET', `/api/trips/${trip.editToken}`);
+  assert.equal(unchanged.body.name, 'Keeps Its Name');
+});
+
 test('an item cannot be deleted through a different trip token', async () => {
   const tripA = await makeTrip('Trip A');
   const tripB = await makeTrip('Trip B');
