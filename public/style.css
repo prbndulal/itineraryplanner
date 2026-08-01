@@ -79,6 +79,17 @@ textarea { resize: vertical; min-height: 70px; }
 
 .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
 .field { min-width: 0; }
+.field-wide { grid-column: 1 / -1; }
+
+/* Who a cost is split between. */
+.sharers { display: flex; flex-wrap: wrap; gap: 8px 14px; padding: 2px 0; }
+.sharer { display: inline-flex; align-items: center; gap: 6px; margin: 0; color: var(--text); font-size: 14px; cursor: pointer; }
+.sharer input { width: auto; margin: 0; accent-color: var(--accent); }
+.row-meta.shared { color: var(--accent); }
+
+/* Expense totals by category. */
+.cats { display: grid; gap: 6px; margin-top: 6px; }
+.cat { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
 
 button {
   font: inherit;

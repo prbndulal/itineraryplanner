@@ -43,7 +43,7 @@ function id() {
 }
 
 export async function load() {
-  // Items live in one table with a `kind` discriminator rather than three
+  // Items live in one table with a `kind` discriminator rather than four
   // near-identical tables; the columns are largely shared and it keeps the
   // per-collection queries uniform.
   await pool.query(`
@@ -56,14 +56,14 @@ export async function load() {
       start_date   TEXT NOT NULL DEFAULT '',
       end_date     TEXT NOT NULL DEFAULT '',
       notes        TEXT NOT NULL DEFAULT '',
-      currency     TEXT NOT NULL DEFAULT 'USD',
+      currency     TEXT NOT NULL DEFAULT 'AUD',
       created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
     );
 
     CREATE TABLE IF NOT EXISTS trip_items (
       id          TEXT PRIMARY KEY,
       trip_id     TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
-      kind        TEXT NOT NULL CHECK (kind IN ('stays', 'activities', 'travellers')),
+      kind        TEXT NOT NULL CHECK (kind IN ('stays', 'activities', 'travellers', 'expenses')),
       position    BIGSERIAL,
       name        TEXT NOT NULL DEFAULT '',
       address     TEXT NOT NULL DEFAULT '',
@@ -75,6 +75,8 @@ export async function load() {
       cost        TEXT NOT NULL DEFAULT '',
       booking_ref TEXT NOT NULL DEFAULT '',
       paid_by     TEXT NOT NULL DEFAULT '',
+      shared_by   TEXT NOT NULL DEFAULT '',
+      category    TEXT NOT NULL DEFAULT '',
       email       TEXT NOT NULL DEFAULT '',
       map_url     TEXT NOT NULL DEFAULT '',
       notes       TEXT NOT NULL DEFAULT ''
@@ -83,6 +85,29 @@ export async function load() {
     CREATE INDEX IF NOT EXISTS trip_items_trip_kind_idx
       ON trip_items (trip_id, kind, position);
   `);
+
+  // Migrations for databases created before these columns existed. CREATE TABLE
+  // IF NOT EXISTS silently does nothing on an existing table, so new columns and
+  // a widened CHECK constraint have to be applied separately. Every statement
+  // here is idempotent so boot stays safe to repeat.
+  await pool.query(`
+    ALTER TABLE trips ALTER COLUMN currency SET DEFAULT 'AUD';
+    ALTER TABLE trip_items ADD COLUMN IF NOT EXISTS shared_by TEXT NOT NULL DEFAULT '';
+    ALTER TABLE trip_items ADD COLUMN IF NOT EXISTS category  TEXT NOT NULL DEFAULT '';
+    ALTER TABLE trip_items DROP CONSTRAINT IF EXISTS trip_items_kind_check;
+    ALTER TABLE trip_items ADD CONSTRAINT trip_items_kind_check
+      CHECK (kind IN ('stays', 'activities', 'travellers', 'expenses'));
+  `);
+}
+
+// Traveller ids sharing a cost are kept as one comma-separated column rather
+// than a join table. Ids are base64url, so they never contain a comma.
+function parseSharedBy(value) {
+  return String(value || '').split(',').filter(Boolean);
+}
+
+export function serialiseSharedBy(ids) {
+  return (Array.isArray(ids) ? ids : parseSharedBy(ids)).filter(Boolean).join(',');
 }
 
 // Maps a trip_items row to the shape the API and frontend already expect.
@@ -96,6 +121,7 @@ function rowToItem(row) {
       cost: row.cost,
       bookingRef: row.booking_ref,
       paidBy: row.paid_by,
+      sharedBy: parseSharedBy(row.shared_by),
     });
   } else if (row.kind === 'activities') {
     Object.assign(item, {
@@ -104,6 +130,16 @@ function rowToItem(row) {
       location: row.location,
       cost: row.cost,
       paidBy: row.paid_by,
+      sharedBy: parseSharedBy(row.shared_by),
+    });
+  } else if (row.kind === 'expenses') {
+    Object.assign(item, {
+      date: row.item_date,
+      category: row.category,
+      location: row.location,
+      cost: row.cost,
+      paidBy: row.paid_by,
+      sharedBy: parseSharedBy(row.shared_by),
     });
   } else {
     item.email = row.email;
@@ -126,6 +162,8 @@ const COLUMNS = {
   cost: 'cost',
   bookingRef: 'booking_ref',
   paidBy: 'paid_by',
+  sharedBy: 'shared_by',
+  category: 'category',
   email: 'email',
   mapUrl: 'map_url',
   notes: 'notes',
@@ -146,6 +184,7 @@ function rowToTrip(row, items) {
     stays: items.filter((i) => i.kind === 'stays').map(rowToItem),
     activities: items.filter((i) => i.kind === 'activities').map(rowToItem),
     travellers: items.filter((i) => i.kind === 'travellers').map(rowToItem),
+    expenses: items.filter((i) => i.kind === 'expenses').map(rowToItem),
   };
 }
 
@@ -218,7 +257,7 @@ export async function deleteTrip(tripId) {
   return rowCount > 0;
 }
 
-const COLLECTIONS = new Set(['stays', 'activities', 'travellers']);
+const COLLECTIONS = new Set(['stays', 'activities', 'travellers', 'expenses']);
 
 export async function addItem(tripId, collection, item) {
   if (!COLLECTIONS.has(collection)) return null;
@@ -270,7 +309,31 @@ export async function removeItem(tripId, collection, itemId) {
     'DELETE FROM trip_items WHERE id = $1 AND trip_id = $2 AND kind = $3',
     [itemId, tripId, collection]
   );
+  if (rowCount > 0 && collection === 'travellers') await forgetTraveller(tripId, itemId);
   return rowCount > 0;
+}
+
+// A removed traveller must not stay referenced as a payer or as one of the
+// people a cost is split between; the rollup filters unknown ids anyway, but
+// leaving them in the rows means a re-added traveller would silently inherit
+// the old one's costs.
+async function forgetTraveller(tripId, travellerId) {
+  await pool.query(
+    'UPDATE trip_items SET paid_by = $1 WHERE trip_id = $2 AND paid_by = $3',
+    ['', tripId, travellerId]
+  );
+  const { rows } = await pool.query(
+    'SELECT id, shared_by FROM trip_items WHERE trip_id = $1 AND shared_by <> $2',
+    [tripId, '']
+  );
+  for (const row of rows) {
+    const remaining = parseSharedBy(row.shared_by).filter((id) => id !== travellerId);
+    if (remaining.length === parseSharedBy(row.shared_by).length) continue;
+    await pool.query('UPDATE trip_items SET shared_by = $1 WHERE id = $2', [
+      remaining.join(','),
+      row.id,
+    ]);
+  }
 }
 
 export async function close() {

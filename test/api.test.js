@@ -289,6 +289,154 @@ test('deleting a trip removes its items too', async () => {
   assert.equal(gone.status, 404);
 });
 
+test('new trips default to AUD', async () => {
+  const trip = await makeTrip();
+  assert.equal(trip.currency, 'AUD');
+});
+
+test('expenses are stored, totalled and broken down by category', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  await call('POST', `/api/trips/${t}/expenses`, {
+    name: 'Dinner at Circular Quay',
+    category: 'Food & drink',
+    date: '2026-10-02',
+    location: 'Sydney CBD',
+    cost: '64.50',
+  });
+  const res = await call('POST', `/api/trips/${t}/expenses`, {
+    name: 'Airport train',
+    category: 'Transport',
+    cost: '20.00',
+  });
+
+  assert.equal(res.status, 201);
+  assert.equal(res.body.expenses.length, 2);
+  assert.equal(res.body.summary.expenseCents, 8450);
+  assert.equal(res.body.summary.totalCents, 8450);
+  assert.equal(res.body.summary.byCategory['Food & drink'], 6450);
+  assert.equal(res.body.summary.byCategory.Transport, 2000);
+
+  const dinner = res.body.expenses.find((e) => e.name === 'Dinner at Circular Quay');
+  assert.equal(dinner.category, 'Food & drink');
+  assert.equal(dinner.date, '2026-10-02');
+});
+
+test('a stay split between some travellers is only owed by them', async () => {
+  const trip = await makeTrip('Sydney');
+  const t = trip.editToken;
+
+  const one = await call('POST', `/api/trips/${t}/travellers`, { name: 'Bharat' });
+  const two = await call('POST', `/api/trips/${t}/travellers`, { name: 'Ashish' });
+  const three = await call('POST', `/api/trips/${t}/travellers`, { name: 'Prabin' });
+  const id = (body, name) => body.travellers.find((x) => x.name === name).id;
+  const bharat = id(three.body, 'Bharat');
+  const ashish = id(three.body, 'Ashish');
+  const prabin = id(three.body, 'Prabin');
+  assert.ok(one.body && two.body);
+
+  await call('POST', `/api/trips/${t}/stays`, {
+    name: 'Single room',
+    cost: '200.00',
+    paidBy: bharat,
+    sharedBy: [bharat],
+  });
+  const res = await call('POST', `/api/trips/${t}/stays`, {
+    name: 'Twin room',
+    cost: '300.00',
+    paidBy: ashish,
+    sharedBy: [ashish, prabin],
+  });
+
+  assert.equal(res.status, 201);
+  const owed = Object.fromEntries(res.body.summary.balances.map((b) => [b.name, b.oweCents]));
+  assert.equal(owed.Bharat, 20000);
+  assert.equal(owed.Ashish, 15000);
+  assert.equal(owed.Prabin, 15000);
+  assert.equal(res.body.summary.splitEvenly, false);
+
+  const twin = res.body.stays.find((s) => s.name === 'Twin room');
+  assert.deepEqual([...twin.sharedBy].sort(), [ashish, prabin].sort());
+});
+
+test('sharedBy ignores ids that are not travellers on this trip', async () => {
+  const tripA = await makeTrip('Trip A');
+  const tripB = await makeTrip('Trip B');
+
+  const mine = await call('POST', `/api/trips/${tripA.editToken}/travellers`, { name: 'Bharat' });
+  const theirs = await call('POST', `/api/trips/${tripB.editToken}/travellers`, { name: 'Outsider' });
+  const outsiderId = theirs.body.travellers[0].id;
+  assert.ok(mine.body.travellers[0].id);
+
+  const res = await call('POST', `/api/trips/${tripA.editToken}/stays`, {
+    name: 'Room',
+    cost: '100.00',
+    sharedBy: [outsiderId],
+  });
+
+  assert.deepEqual(res.body.stays[0].sharedBy, [], "another trip's traveller must be dropped");
+  // Falls back to everyone, so the one real traveller owes the whole amount.
+  assert.equal(res.body.summary.balances[0].oweCents, 10000);
+});
+
+test('removing a traveller clears them from payers and splits', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  const added = await call('POST', `/api/trips/${t}/travellers`, { name: 'Bharat' });
+  const second = await call('POST', `/api/trips/${t}/travellers`, { name: 'Ashish' });
+  const bharat = second.body.travellers.find((x) => x.name === 'Bharat').id;
+  const ashish = second.body.travellers.find((x) => x.name === 'Ashish').id;
+  assert.ok(added.body);
+
+  await call('POST', `/api/trips/${t}/stays`, {
+    name: 'Room',
+    cost: '100.00',
+    paidBy: bharat,
+    sharedBy: [bharat, ashish],
+  });
+
+  const after = await call('DELETE', `/api/trips/${t}/travellers/${bharat}`);
+  assert.equal(after.status, 200);
+  assert.equal(after.body.stays[0].paidBy, '', 'a deleted traveller must not stay listed as payer');
+  assert.deepEqual(after.body.stays[0].sharedBy, [ashish]);
+  assert.equal(after.body.summary.balances.length, 1);
+  assert.equal(after.body.summary.balances[0].oweCents, 10000, 'Ashish now carries the whole room');
+});
+
+// These deliberately use a trip with no destination. That path returns before
+// any network call, so the suite stays fast and does not fail when
+// OpenStreetMap is busy. The live lookup is exercised by hand, not here.
+test('suggestions ask for a destination instead of guessing', async () => {
+  const trip = await makeTrip();
+  await call('PATCH', `/api/trips/${trip.editToken}`, { destination: '' });
+
+  const res = await call('GET', `/api/trips/${trip.editToken}/suggestions`);
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.places, []);
+  assert.match(res.body.error, /destination/i);
+});
+
+test('a view token can read suggestions but still cannot write', async () => {
+  const trip = await makeTrip();
+  await call('PATCH', `/api/trips/${trip.editToken}`, { destination: '' });
+
+  const res = await call('GET', `/api/trips/${trip.viewToken}/suggestions`);
+  assert.equal(res.status, 200, 'everyone on the trip should see ideas');
+  assert.ok(Array.isArray(res.body.places));
+
+  const write = await call('POST', `/api/trips/${trip.viewToken}/expenses`, { name: 'Sneaky' });
+  assert.equal(write.status, 403);
+});
+
+test('an unknown token cannot reach the places lookup', async () => {
+  // Otherwise the endpoint would be an open proxy to OpenStreetMap for anyone
+  // who guessed the URL shape.
+  const res = await call('GET', '/api/trips/not-a-real-token/suggestions?q=Sydney');
+  assert.equal(res.status, 404);
+});
+
 test('health check responds', async () => {
   const res = await call('GET', '/healthz');
   assert.equal(res.status, 200);

@@ -4,9 +4,14 @@ Plan a trip, track what it costs, and share it with everyone coming along.
 
 - **Stays** — hotel, address, check-in/out, nightly count, booking reference, cost, map link
 - **Itinerary** — activities with date, time, location, cost
+- **Expenses** — everything else: meals, taxis, tickets, by category and date
 - **Travellers** — who is coming, who paid for what
-- **Costs** — running total, per-person split, and who owes whom
+- **Costs** — running total, category breakdown, and who owes whom
+- **Splitting** — each cost can be shared by the whole group or just the people it was for
+- **Places to go** — attraction suggestions near the destination, from OpenStreetMap
 - **Sharing** — every trip has a read-only link and an edit link; no accounts needed
+
+Everything is editable in place; amounts default to AUD and can be changed per trip.
 
 ## Running locally
 
@@ -60,6 +65,7 @@ and restarts.
 src/server.js   HTTP routes, access control, input validation
 src/store.js    All database access; the only file that knows about Postgres
 src/costs.js    Money math — integer cents, remainder-preserving splits
+src/places.js   Place suggestions via OpenStreetMap (no key, no account)
 public/         Frontend (vanilla ES modules, no build step)
 test/           Cost math and end-to-end API tests
 ```
@@ -72,7 +78,25 @@ drifts visibly. Amounts convert to cents at the boundary and divide only for
 display.
 
 **Splits preserve every cent.** $10.00 across 3 people is 334/333/333, never
-three times 3.33 — the remainder is distributed rather than dropped.
+three times 3.33 — the remainder is distributed rather than dropped. Each item
+is split within itself, so a cost shared by two of three people still adds up to
+exactly that cost.
+
+**Not every cost is shared by everyone.** A room booked for one person should
+not be divided across the whole group, so each stay, activity, and expense can
+name who it is for. Naming nobody means everyone, which is also what happens to
+anyone added to the trip later. Once any cost is restricted to a subset, the
+single "each person pays X" figure stops being meaningful and is hidden in
+favour of the per-person shares.
+
+**Place suggestions use OpenStreetMap, not a paid API.** Nominatim geocodes the
+destination and Overpass lists tourist attractions nearby — no key, no account,
+no billing. It is donated infrastructure, so results are cached for a day, the
+lookup only runs when asked for, and failures degrade to a message rather than
+breaking the page. Overpass returns elements in id order rather than by
+relevance, so the query has to fetch the whole match set before ranking: a low
+cap silently drops the relations, and relations are where landmarks like the
+Sydney Opera House live.
 
 **Item writes are scoped by trip.** Update and delete queries match on
 `trip_id` as well as item id, so a token for one trip cannot touch another

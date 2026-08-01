@@ -17,7 +17,7 @@ export function el(tag, attrs = {}, ...children) {
   return node;
 }
 
-export function money(cents, currency = 'USD') {
+export function money(cents, currency = 'AUD') {
   try {
     return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format((cents || 0) / 100);
   } catch {

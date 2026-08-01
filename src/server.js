@@ -2,6 +2,7 @@ import express from 'express';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import * as store from './store.js';
+import * as places from './places.js';
 import { summarise, nightsBetween, formatCents } from './costs.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -77,9 +78,28 @@ const COLLECTION_FIELDS = {
   stays: ['name', 'address', 'checkIn', 'checkOut', 'cost', 'bookingRef', 'paidBy', 'notes'],
   activities: ['name', 'date', 'time', 'location', 'cost', 'paidBy', 'notes'],
   travellers: ['name', 'email', 'notes'],
+  expenses: ['name', 'category', 'date', 'location', 'cost', 'paidBy', 'notes'],
 };
 
-function buildItem(collection, body) {
+// Collections whose items carry a cost that can be split across a subset of the
+// group. Travellers are people, not costs, so they are not in this set.
+const SPLITTABLE = new Set(['stays', 'activities', 'expenses']);
+
+// The list of people a cost is split between arrives as an array of traveller
+// ids (or a comma-separated string). Ids are checked against the trip's actual
+// travellers so a request cannot attach a cost to an id from another trip.
+function cleanSharedBy(value, travellers) {
+  const raw = Array.isArray(value) ? value : String(value ?? '').split(',');
+  const known = new Set(travellers.map((t) => t.id));
+  const seen = new Set();
+  for (const entry of raw) {
+    const id = String(entry ?? '').trim();
+    if (id && known.has(id)) seen.add(id);
+  }
+  return [...seen];
+}
+
+function buildItem(collection, body, trip) {
   const allowed = COLLECTION_FIELDS[collection];
   if (!allowed) return { error: 'Unknown section' };
 
@@ -94,6 +114,12 @@ function buildItem(collection, body) {
     const url = safeMapUrl(body.mapUrl);
     if (url === null) return { error: 'Map link must be a valid http(s) URL' };
     item.mapUrl = url;
+  }
+
+  if ('sharedBy' in body && SPLITTABLE.has(collection)) {
+    // Stored as a comma-separated column; an empty value means "everyone", which
+    // is how items behaved before per-item splitting existed.
+    item.sharedBy = cleanSharedBy(body.sharedBy, trip.travellers).join(',');
   }
 
   return { item };
@@ -154,6 +180,28 @@ app.get('/api/trips/:token', resolve, (req, res) => {
   res.json(present(req.trip, req.canEdit));
 });
 
+// Place suggestions near the trip's destination. Read-only, so a view token is
+// enough — everyone on the trip should be able to browse ideas even if only the
+// owner can add them. `q` overrides the destination, so you can look around a
+// specific neighbourhood instead of the whole city.
+app.get('/api/trips/:token/suggestions', resolve, async (req, res, next) => {
+  try {
+    const query = cleanText(req.query.q, 120) || cleanText(req.trip.destination, 120);
+    if (!query) {
+      return res.json({
+        configured: places.isConfigured(),
+        places: [],
+        query: '',
+        error: 'Set a destination on the trip, or search for a place.',
+      });
+    }
+    const result = await places.search(query);
+    res.json({ ...result, query });
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.patch('/api/trips/:token', resolve, requireEdit, async (req, res, next) => {
   try {
     const fields = {};
@@ -184,7 +232,7 @@ app.delete('/api/trips/:token', resolve, requireEdit, async (req, res, next) => 
 app.post('/api/trips/:token/:collection', resolve, requireEdit, async (req, res, next) => {
   try {
     const { collection } = req.params;
-    const { item, error } = buildItem(collection, req.body || {});
+    const { item, error } = buildItem(collection, req.body || {}, req.trip);
     if (error) return res.status(400).json({ error });
     const created = await store.addItem(req.trip.id, collection, item);
     if (!created) return res.status(400).json({ error: 'Unknown section' });
@@ -197,7 +245,7 @@ app.post('/api/trips/:token/:collection', resolve, requireEdit, async (req, res,
 app.patch('/api/trips/:token/:collection/:itemId', resolve, requireEdit, async (req, res, next) => {
   try {
     const { collection, itemId } = req.params;
-    const { item, error } = buildItem(collection, req.body || {});
+    const { item, error } = buildItem(collection, req.body || {}, req.trip);
     if (error) return res.status(400).json({ error });
     const updated = await store.updateItem(req.trip.id, collection, itemId, item);
     if (!updated) return res.status(404).json({ error: 'Item not found' });
