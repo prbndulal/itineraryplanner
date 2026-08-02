@@ -2,11 +2,14 @@
 
 Plan a trip, track what it costs, and share it with everyone coming along.
 
-- **Stays** — hotel, address, check-in/out, nightly count, booking reference, cost, map link
+- **Route** — stays drawn as a journey: each stop in date order, nights, per-night
+  rate, and a marker on any stretch of the trip with nowhere booked
 - **Itinerary** — activities with date, time, location, cost
 - **Expenses** — everything else: meals, taxis, tickets, by category and date
 - **Travellers** — who is coming, who paid for what
 - **Costs** — running total, category breakdown, and who owes whom
+- **Settling up** — turns the balances into "X pays Y" so the group can square up
+- **Reports** — a printable per-person statement of what they owe or are owed
 - **Splitting** — each cost can be shared by the whole group or just the people it was for
 - **Places to go** — attraction suggestions near the destination, from OpenStreetMap
 - **Sharing** — every trip has a read-only link and an edit link; no accounts needed
@@ -62,12 +65,15 @@ and restarts.
 ## Layout
 
 ```
-src/server.js   HTTP routes, access control, input validation
-src/store.js    All database access; the only file that knows about Postgres
-src/costs.js    Money math — integer cents, remainder-preserving splits
-src/places.js   Place suggestions via OpenStreetMap (no key, no account)
-public/         Frontend (vanilla ES modules, no build step)
-test/           Cost math and end-to-end API tests
+src/server.js       HTTP routes, access control, input validation
+src/store.js        All database access; the only file that knows about Postgres
+src/costs.js        Money math — integer cents, splits, settlement, unbooked nights
+src/places.js       Place suggestions via OpenStreetMap (no key, no account)
+public/trip.html    The trip page: route timeline, costs, editing
+public/report.html  Per-person printable reports
+public/trip-ui.js   Presentational helpers shared by both pages
+public/app.js       DOM and fetch primitives
+test/               Cost math and end-to-end API tests
 ```
 
 ### Notes on the design
@@ -98,9 +104,38 @@ relevance, so the query has to fetch the whole match set before ranking: a low
 cap silently drops the relations, and relations are where landmarks like the
 Sydney Opera House live.
 
+**A cost with no payer is money nobody is owed.** Balances only net to zero once
+every cost records who paid for it. Until then the totals are short by whatever
+is unattributed, and matching debtors against creditors would invent debts that
+nobody actually owes. `settle()` caps the debt side at what is genuinely owed and
+reports the remainder as `unpaidCents`, so the UI can ask who paid instead of
+inventing an answer. Assigning a payer is a single tap on each cost for exactly
+this reason.
+
+**Settlement is greedy, not minimal.** Debtors are matched against creditors
+largest-first, which settles any group in at most one transfer fewer than there
+are people. Finding the true minimum set of transfers is NP-hard and the
+difference never shows up at the size of a holiday.
+
+**Reports are a static page that fetches the trip like any other client.** The
+report route serves HTML with no token in it and reads its data from
+`/api/trips/:token`, so it inherits that endpoint's access control rather than
+adding a second copy of it. A read-only link opens a report; it still never
+receives the edit token.
+
+**Printing is the same DOM, not a second rendering path.** Choosing whose report
+to read sets an attribute on `<body>`, and one CSS rule hides the others — so
+what prints is exactly what is on screen. The print stylesheet also redeclares
+the light palette, because the dark-mode media query still matches when printing
+from a dark-mode machine and would otherwise produce a black page.
+
 **Item writes are scoped by trip.** Update and delete queries match on
 `trip_id` as well as item id, so a token for one trip cannot touch another
 trip's rows even if an item id is guessed.
+
+**A partial update leaves unsent fields alone.** Assigning a payer sends only
+that one field, so an absent name means "unchanged" rather than "clear it".
+Creating an item still requires a name.
 
 **Map links are validated as http(s).** A `javascript:` URL stored and rendered
 into an `href` would execute for anyone who clicked it.

@@ -442,3 +442,120 @@ test('health check responds', async () => {
   assert.equal(res.status, 200);
   assert.equal(res.body.ok, true);
 });
+
+// --- reports and settlement -------------------------------------------------
+
+test('the report page is served for both link types', async () => {
+  const trip = await makeTrip();
+
+  for (const token of [trip.editToken, trip.viewToken]) {
+    const res = await fetch(`${base}/t/${token}/report`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type'), /text\/html/);
+  }
+});
+
+test('the report page never carries a token in its HTML', async () => {
+  // The page is a static shell that fetches its data client-side. If it ever
+  // becomes server-rendered, this catches an edit token being baked into it.
+  const trip = await makeTrip();
+  const res = await fetch(`${base}/t/${trip.viewToken}/report`);
+  const html = await res.text();
+
+  assert.ok(!html.includes(trip.editToken), 'an edit token must never reach the report HTML');
+  assert.ok(!html.includes(trip.viewToken), 'the view token should not be baked in either');
+});
+
+test('a view token gets the settlement but still no edit token', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  const withA = await call('POST', `/api/trips/${t}/travellers`, { name: 'Prabin' });
+  const prabinId = withA.body.travellers[0].id;
+  await call('POST', `/api/trips/${t}/travellers`, { name: 'Sam' });
+  await call('POST', `/api/trips/${t}/stays`, { name: 'Hotel', cost: '300.00', paidBy: prabinId });
+
+  const shared = await call('GET', `/api/trips/${trip.viewToken}`);
+  assert.equal(shared.status, 200);
+  assert.equal(shared.body.editToken, undefined, 'the settlement must not come with edit access');
+
+  const settlement = shared.body.summary.settlement;
+  assert.equal(settlement.transfers.length, 1);
+  assert.equal(settlement.transfers[0].toName, 'Prabin');
+  assert.equal(settlement.transfers[0].cents, 15000);
+  assert.equal(settlement.unpaidCents, 0);
+});
+
+test('costs with no payer are reported as unattributed, not as debts', async () => {
+  // This is the state the real trip is in: costs recorded, nobody marked as
+  // having paid. The API must not hand back invented transfers.
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  await call('POST', `/api/trips/${t}/travellers`, { name: 'Bharat' });
+  await call('POST', `/api/trips/${t}/travellers`, { name: 'Ashish' });
+  await call('POST', `/api/trips/${t}/travellers`, { name: 'Prabin' });
+  const res = await call('POST', `/api/trips/${t}/stays`, { name: 'Cairns', cost: '1591.99' });
+
+  const { settlement, totalCents } = res.body.summary;
+  assert.deepEqual(settlement.transfers, []);
+  assert.equal(settlement.unpaidCents, totalCents);
+  assert.equal(settlement.settled, false);
+});
+
+test('assigning a payer takes one field and keeps the rest intact', async () => {
+  // The payer chips PATCH nothing but paidBy. If the name were required here,
+  // every tap would fail with a 400.
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  const withTraveller = await call('POST', `/api/trips/${t}/travellers`, { name: 'Prabin' });
+  const prabinId = withTraveller.body.travellers[0].id;
+  const added = await call('POST', `/api/trips/${t}/stays`, {
+    name: 'Ballina Palms',
+    address: 'Ballina',
+    cost: '344.70',
+  });
+  const stayId = added.body.stays[0].id;
+
+  const patched = await call('PATCH', `/api/trips/${t}/stays/${stayId}`, { paidBy: prabinId });
+  assert.equal(patched.status, 200);
+
+  const stay = patched.body.stays[0];
+  assert.equal(stay.paidBy, prabinId);
+  assert.equal(stay.name, 'Ballina Palms', 'the name must survive a payer-only update');
+  assert.equal(stay.address, 'Ballina');
+  assert.equal(stay.cost, '344.70');
+
+  // Tapping the same chip again clears the payer.
+  const cleared = await call('PATCH', `/api/trips/${t}/stays/${stayId}`, { paidBy: '' });
+  assert.equal(cleared.status, 200);
+  assert.equal(cleared.body.stays[0].paidBy, '');
+  assert.equal(cleared.body.stays[0].name, 'Ballina Palms');
+});
+
+test('an empty name is still rejected when one is sent', async () => {
+  const trip = await makeTrip();
+  const added = await call('POST', `/api/trips/${trip.editToken}/stays`, { name: 'Hotel' });
+  const stayId = added.body.stays[0].id;
+
+  const res = await call('PATCH', `/api/trips/${trip.editToken}/stays/${stayId}`, { name: '  ' });
+  assert.equal(res.status, 400);
+});
+
+test('unbooked nights are reported with the trip', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  await call('PATCH', `/api/trips/${t}`, { startDate: '2026-09-25', endDate: '2026-10-09' });
+  const res = await call('POST', `/api/trips/${t}/stays`, {
+    name: 'Cairns',
+    checkIn: '2026-09-25',
+    checkOut: '2026-10-04',
+    cost: '1591.99',
+  });
+
+  assert.deepEqual(res.body.summary.gaps, [
+    { from: '2026-10-04', to: '2026-10-09', nights: 5 },
+  ]);
+});

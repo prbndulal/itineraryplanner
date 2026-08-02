@@ -115,6 +115,170 @@ export function summarise(trip) {
   };
 }
 
+// Turns per-person balances into a concrete list of "X pays Y" transfers.
+//
+// The tricky part is that balances only net to zero when every cost has a payer
+// recorded. A cost nobody is marked as paying still lands on everyone's `owe`
+// side, so the totals come out negative overall: money left someone's pocket but
+// the app doesn't know whose. Inventing transfers from that state would fabricate
+// debts, so the unattributed amount is capped out of the matching and reported
+// separately as `unpaidCents` for the UI to prompt about.
+export function settle(balances) {
+  const unpaidCents = -balances.reduce((sum, b) => sum + b.netCents, 0);
+
+  // Sorted by amount, then id, so the same input always produces the same list.
+  // The report must not reshuffle between viewing it and printing it.
+  const byAmount = (a, b) => b.amount - a.amount || String(a.id).localeCompare(String(b.id));
+
+  const creditors = balances
+    .filter((b) => b.netCents > 0)
+    .map((b) => ({ id: b.id, name: b.name, amount: b.netCents }))
+    .sort(byAmount);
+
+  const debtors = balances
+    .filter((b) => b.netCents < 0)
+    .map((b) => ({ id: b.id, name: b.name, amount: -b.netCents }))
+    .sort(byAmount);
+
+  // Debts can exceed credits by exactly `unpaidCents`. Scale the debt side down
+  // to match what is actually owed to someone, largest debts absorbing the
+  // reduction first. With no payers at all this zeroes every debt, which is the
+  // correct answer: nobody can be told who to pay yet.
+  const totalCredit = creditors.reduce((sum, c) => sum + c.amount, 0);
+  let excess = debtors.reduce((sum, d) => sum + d.amount, 0) - totalCredit;
+  for (const debtor of debtors) {
+    if (excess <= 0) break;
+    const cut = Math.min(debtor.amount, excess);
+    debtor.amount -= cut;
+    excess -= cut;
+  }
+
+  // Greedy two-pointer matching. Settles in at most n-1 transfers, which is
+  // optimal for the shapes that come up in practice. (Finding the true minimum
+  // in every case is NP-hard, so this deliberately doesn't claim to be minimal.)
+  const transfers = [];
+  let i = 0;
+  let j = 0;
+  while (i < debtors.length && j < creditors.length) {
+    const debtor = debtors[i];
+    const creditor = creditors[j];
+    const amount = Math.min(debtor.amount, creditor.amount);
+
+    if (amount > 0) {
+      transfers.push({
+        fromId: debtor.id,
+        fromName: debtor.name,
+        toId: creditor.id,
+        toName: creditor.name,
+        cents: amount,
+      });
+      debtor.amount -= amount;
+      creditor.amount -= amount;
+    }
+
+    if (debtor.amount === 0) i += 1;
+    if (creditor.amount === 0) j += 1;
+  }
+
+  return {
+    transfers,
+    unpaidCents: Math.max(0, unpaidCents),
+    settled: transfers.length === 0 && unpaidCents === 0,
+  };
+}
+
+// Everything one person's report needs, so the page never redoes money math.
+//
+// Shares are accumulated with the same per-item ordering `summarise` uses, which
+// is what keeps a person's line items adding up to exactly the `oweCents` shown
+// on the summary. Recomputing an average here instead would drift by a cent on
+// amounts that don't divide evenly.
+export function personLedger(trip, travellerId) {
+  const traveller = trip.travellers.find((t) => t.id === travellerId);
+  if (!traveller) return null;
+
+  const summary = summarise(trip);
+  const settlement = settle(summary.balances);
+  const balance = summary.balances.find((b) => b.id === travellerId);
+
+  const collections = [
+    ['stays', trip.stays],
+    ['activities', trip.activities],
+    ['expenses', trip.expenses || []],
+  ];
+
+  const nameOf = new Map(trip.travellers.map((t) => [t.id, t.name]));
+  const items = [];
+
+  for (const [collection, list] of collections) {
+    for (const item of list) {
+      const cents = toCents(item.cost);
+      const sharers = sharersOf(item, trip.travellers);
+      const index = sharers.indexOf(travellerId);
+      const paidByMe = item.paidBy === travellerId;
+
+      // Keep an item the person paid for even when they aren't sharing its cost,
+      // otherwise their "what you paid for" list would silently lose entries.
+      if (index === -1 && !paidByMe) continue;
+
+      const shares = splitCents(cents, sharers.length);
+      items.push({
+        collection,
+        name: item.name,
+        date: item.checkIn || item.date || '',
+        costCents: cents,
+        shareCents: index === -1 ? 0 : shares[index],
+        paidByMe,
+        sharerCount: sharers.length,
+        sharerNames: sharers.map((id) => nameOf.get(id)).filter(Boolean),
+      });
+    }
+  }
+
+  return {
+    traveller,
+    items,
+    paidCents: balance.paidCents,
+    oweCents: balance.oweCents,
+    netCents: balance.netCents,
+    owes: settlement.transfers
+      .filter((t) => t.fromId === travellerId)
+      .map((t) => ({ toName: t.toName, cents: t.cents })),
+    owedBy: settlement.transfers
+      .filter((t) => t.toId === travellerId)
+      .map((t) => ({ fromName: t.fromName, cents: t.cents })),
+    unpaidCents: settlement.unpaidCents,
+  };
+}
+
+// Nights in the trip's date range that no stay covers, so unbooked stretches are
+// visible rather than being silently absent from the itinerary.
+export function accommodationGaps(trip) {
+  if (!trip.startDate || !trip.endDate) return [];
+
+  const stays = trip.stays
+    .filter((s) => s.checkIn && s.checkOut && nightsBetween(s.checkIn, s.checkOut) > 0)
+    .sort((a, b) => a.checkIn.localeCompare(b.checkIn));
+
+  const gaps = [];
+  let cursor = trip.startDate;
+
+  for (const stay of stays) {
+    if (stay.checkIn > cursor) {
+      gaps.push({ from: cursor, to: stay.checkIn, nights: nightsBetween(cursor, stay.checkIn) });
+    }
+    // Overlapping stays must not pull the cursor backwards, which would invent a
+    // gap where the dates actually double up.
+    if (stay.checkOut > cursor) cursor = stay.checkOut;
+  }
+
+  if (trip.endDate > cursor) {
+    gaps.push({ from: cursor, to: trip.endDate, nights: nightsBetween(cursor, trip.endDate) });
+  }
+
+  return gaps;
+}
+
 // Nights between two ISO dates, used to show per-night hotel rates.
 export function nightsBetween(checkIn, checkOut) {
   if (!checkIn || !checkOut) return 0;

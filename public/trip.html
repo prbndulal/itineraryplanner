@@ -8,17 +8,17 @@
 </head>
 <body>
 <div class="wrap">
-  <header class="page">
-    <h1 id="trip-name">Loading…</h1>
-    <p id="trip-sub"></p>
-  </header>
+  <div id="hero"></div>
   <div id="content"></div>
 </div>
 
 <script type="module">
 import { api, money, el } from '/app.js';
+import { hero, formatRange, nightsLabel, settlementLines } from '/trip-ui.js';
 
-const token = window.location.pathname.split('/').pop();
+// /t/<token>, so take the segment after "t" rather than the last one — the
+// report page lives at /t/<token>/report and would otherwise parse as "report".
+const token = window.location.pathname.split('/').filter(Boolean)[1];
 const content = document.getElementById('content');
 let trip = null;
 
@@ -30,6 +30,84 @@ let editing = null;
 
 function card(title, ...children) {
   return el('div', { class: 'card' }, el('h2', {}, title), ...children);
+}
+
+// One tap to record who paid for something. The alternative is opening the row's
+// editor and saving it, which is far too slow for setting a payer on every stay.
+function payerChips(collection, item) {
+  if (!trip.canEdit || !trip.travellers.length) return null;
+
+  const row = el('div', { class: 'chip-row' }, el('span', { class: 'chip-label' }, 'Paid by'));
+
+  for (const traveller of trip.travellers) {
+    const selected = item.paidBy === traveller.id;
+    const chip = el('button', {
+      type: 'button',
+      class: 'chip',
+      'aria-pressed': String(selected),
+    }, traveller.name);
+
+    chip.addEventListener('click', async () => {
+      for (const button of row.querySelectorAll('button')) button.disabled = true;
+      try {
+        // Tapping the current payer clears it, so a mistake is one tap to undo.
+        render(await api(`/api/trips/${token}/${collection}/${item.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ paidBy: selected ? '' : traveller.id }),
+        }));
+      } catch (err) {
+        alert(err.message);
+        for (const button of row.querySelectorAll('button')) button.disabled = false;
+      }
+    });
+
+    row.append(chip);
+  }
+
+  return row;
+}
+
+// Assigns every cost that has no payer yet in one go, for the common case where
+// one person fronted the whole trip.
+function bulkPayerRow() {
+  const unassigned = [...trip.stays, ...trip.activities, ...(trip.expenses || [])]
+    .filter((item) => !item.paidBy && Number(item.cost || 0) > 0);
+
+  if (!trip.canEdit || !trip.travellers.length || !unassigned.length) return null;
+
+  const row = el('div', { class: 'chip-row' },
+    el('span', { class: 'chip-label' },
+      `${unassigned.length} cost${unassigned.length === 1 ? '' : 's'} with no payer — set all to`));
+
+  for (const traveller of trip.travellers) {
+    const chip = el('button', { type: 'button', class: 'chip' }, traveller.name);
+
+    chip.addEventListener('click', async () => {
+      for (const button of row.querySelectorAll('button')) button.disabled = true;
+      try {
+        let latest = null;
+        for (const item of unassigned) {
+          const collection = trip.stays.includes(item)
+            ? 'stays'
+            : trip.activities.includes(item)
+              ? 'activities'
+              : 'expenses';
+          latest = await api(`/api/trips/${token}/${collection}/${item.id}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ paidBy: traveller.id }),
+          });
+        }
+        if (latest) render(latest);
+      } catch (err) {
+        alert(err.message);
+        for (const button of row.querySelectorAll('button')) button.disabled = false;
+      }
+    });
+
+    row.append(chip);
+  }
+
+  return el('div', { style: 'margin-bottom:16px' }, row);
 }
 
 const EXPENSE_CATEGORIES = ['Food & drink', 'Transport', 'Tickets', 'Shopping', 'Fees', 'Other'];
@@ -422,15 +500,37 @@ function tripForm() {
 
 function render(data) {
   trip = data;
-  document.getElementById('trip-name').textContent = trip.name;
   document.title = `${trip.name} · Itinerary Planner`;
-
-  const dates = [trip.startDate, trip.endDate].filter(Boolean).join(' → ');
-  document.getElementById('trip-sub').textContent =
-    [trip.destination, dates].filter(Boolean).join(' · ') || 'No dates set yet';
 
   const sections = [];
   const cur = trip.currency;
+  const s = trip.summary;
+
+  // --- Hero ----------------------------------------------------------------
+  const tripNights = trip.startDate && trip.endDate
+    ? Math.max(0, Math.round(
+        (Date.parse(`${trip.endDate}T00:00:00Z`) - Date.parse(`${trip.startDate}T00:00:00Z`)) / 86400000))
+    : 0;
+  const bookedNights = trip.stays.reduce((sum, stay) => sum + (stay.nights || 0), 0);
+  const unbooked = (s.gaps || []).reduce((sum, g) => sum + g.nights, 0);
+
+  document.getElementById('hero').replaceChildren(
+    hero(trip, {
+      tiles: [
+        { label: 'Total', value: money(s.totalCents, cur) },
+        s.headcount > 0 && s.splitEvenly
+          ? { label: `Each (${s.headcount})`, value: money(s.perPersonCents, cur) }
+          : null,
+        tripNights
+          ? {
+              label: 'Nights booked',
+              value: `${bookedNights} of ${tripNights}`,
+              warn: unbooked > 0,
+            }
+          : null,
+      ].filter(Boolean),
+    })
+  );
 
   // --- Trip details --------------------------------------------------------
   if (trip.canEdit) {
@@ -440,7 +540,6 @@ function render(data) {
   }
 
   // --- Costs ---------------------------------------------------------------
-  const s = trip.summary;
   const tile = (label, value) =>
     el('div', { class: 'total-tile' }, el('div', { class: 'k' }, label), el('div', { class: 'v' }, value));
 
@@ -496,52 +595,134 @@ function render(data) {
       );
     }
     costChildren.push(balances);
+
+    // Net balances say how far off square each person is; this says what to
+    // actually do about it.
+    costChildren.push(el('div', { style: 'margin-top:18px' },
+      el('label', {}, 'Settling up'),
+      settlementLines(s.settlement, cur)
+    ));
+
+    const reports = el('div', { class: 'chip-row', style: 'margin-top:14px' },
+      el('span', { class: 'chip-label' }, 'Reports'),
+      el('a', { class: 'chip', href: `/t/${token}/report` }, 'Everyone')
+    );
+    for (const b of s.balances) {
+      reports.append(
+        el('a', { class: 'chip', href: `/t/${token}/report?p=${encodeURIComponent(b.id)}` }, b.name)
+      );
+    }
+    costChildren.push(reports);
   }
   sections.push(card('Costs', ...costChildren));
 
-  // --- Stays ---------------------------------------------------------------
-  const stayList = el('div');
-  if (!trip.stays.length) {
-    stayList.append(el('p', { class: 'empty' }, 'No stays added yet.'));
+  // --- Route ---------------------------------------------------------------
+  // Stays are drawn as a journey rather than a list: for a trip that moves from
+  // town to town, the order and the joins between stops are the point.
+  const journey = el('ol', { class: 'journey' });
+  const stays = [...trip.stays].sort((a, b) => (a.checkIn || '').localeCompare(b.checkIn || ''));
+
+  // Per-night rates make an expensive-looking total comparable across stops.
+  const rates = stays
+    .filter((s) => s.nights > 0)
+    .map((s) => Math.round(Number(s.cost || 0) * 100 / s.nights));
+  const bestRate = rates.length > 1 ? Math.min(...rates) : null;
+
+  const gapsByStart = new Map((s.gaps || []).map((g) => [g.from, g]));
+
+  if (!stays.length) {
+    journey.append(el('li', { class: 'empty' }, 'No stays added yet.'));
   } else {
-    for (const stay of trip.stays) {
+    stays.forEach((stay, index) => {
       if (isEditing('stays', stay.id)) {
-        stayList.append(editRow('stays', stay));
-        continue;
+        journey.append(el('li', {}, editRow('stays', stay)));
+        return;
       }
 
-      const meta = [stay.address, [stay.checkIn, stay.checkOut].filter(Boolean).join(' → ')]
-        .filter(Boolean).join(' · ');
-      const extra = [
-        stay.nights ? `${stay.nights} night${stay.nights === 1 ? '' : 's'}` : null,
-        stay.bookingRef ? `Ref ${stay.bookingRef}` : null,
-        payerName(stay.paidBy) ? `Paid by ${payerName(stay.paidBy)}` : null,
+      const cents = Math.round(Number(stay.cost || 0) * 100);
+      const rate = stay.nights > 0 ? Math.round(cents / stay.nights) : null;
+      const next = stays[index + 1];
+      // A dashed connector marks a break in the dates; solid means the next stop
+      // starts the day this one ends.
+      const contiguous = next && stay.checkOut && stay.checkOut === next.checkIn;
+
+      const when = [
+        formatRange(stay.checkIn, stay.checkOut),
+        stay.nights ? nightsLabel(stay.nights) : null,
       ].filter(Boolean).join(' · ');
 
-      stayList.append(
-        el('div', { class: 'row' },
-          el('div', { class: 'row-main' },
-            el('div', { class: 'row-title' }, stay.name),
-            meta ? el('div', { class: 'row-meta' }, meta) : null,
-            extra ? el('div', { class: 'row-meta' }, extra) : null,
-            sharedLabel(stay) ? el('div', { class: 'row-meta shared' }, sharedLabel(stay)) : null,
-            stay.notes ? el('div', { class: 'row-meta' }, stay.notes) : null,
-            mapLink(stay.mapUrl)
-          ),
-          el('div', { class: 'row-side' },
-            el('div', { class: 'amount' }, money(Math.round(Number(stay.cost || 0) * 100), cur)),
+      const meta = [stay.address, stay.bookingRef ? `Ref ${stay.bookingRef}` : null]
+        .filter(Boolean).join(' · ');
+
+      journey.append(
+        el('li', { class: next && !contiguous ? 'leg leg-break' : 'leg' },
+          el('div', { class: 'leg-body' },
+            when ? el('div', { class: 'leg-when' }, when) : null,
+            el('div', { class: 'leg-title' }, stay.name),
+            meta ? el('div', { class: 'leg-meta' }, meta) : null,
+            el('div', { class: 'leg-money' },
+              el('span', { class: 'amount' }, money(cents, cur)),
+              rate !== null && stay.nights > 1
+                ? el('span', { class: 'rate' }, `${money(rate, cur)} / night`)
+                : null,
+              rate !== null && bestRate !== null && rate === bestRate
+                ? el('span', { class: 'rate-best' }, 'best rate')
+                : null
+            ),
+            payerName(stay.paidBy)
+              ? el('div', { class: 'leg-meta' }, `Paid by ${payerName(stay.paidBy)}`)
+              : null,
+            sharedLabel(stay) ? el('div', { class: 'leg-meta shared' }, sharedLabel(stay)) : null,
+            stay.notes ? el('div', { class: 'leg-meta' }, stay.notes) : null,
+            mapLink(stay.mapUrl),
+            payerChips('stays', stay),
             rowActions('stays', stay.id)
           )
         )
       );
-    }
+
+      // Unbooked nights sit in the timeline where they actually fall, so a hole
+      // in the plan is visible instead of being simply absent.
+      const gap = stay.checkOut ? gapsByStart.get(stay.checkOut) : null;
+      if (gap) {
+        journey.append(
+          el('li', { class: 'leg leg-gap' },
+            el('div', { class: 'leg-body', role: 'status' },
+              el('div', { class: 'leg-when' }, formatRange(gap.from, gap.to)),
+              el('div', { class: 'leg-title' },
+                `${nightsLabel(gap.nights)} with nowhere booked`),
+              el('div', { class: 'leg-meta' }, 'Add a stay to cover this stretch.')
+            )
+          )
+        );
+      }
+    });
   }
 
-  const stayChildren = [stayList];
-  if (trip.canEdit) {
-    stayChildren.push(el('div', { style: 'margin-top:16px' }, itemForm('stays')));
+  // A gap before the first stay has no stop to hang off, so it goes on top.
+  const leadingGap = (s.gaps || []).find((g) => g.from === trip.startDate)
+    && (!stays.length || stays[0].checkIn !== trip.startDate)
+    ? (s.gaps || []).find((g) => g.from === trip.startDate)
+    : null;
+
+  if (leadingGap) {
+    journey.prepend(
+      el('li', { class: 'leg leg-gap' },
+        el('div', { class: 'leg-body', role: 'status' },
+          el('div', { class: 'leg-when' }, formatRange(leadingGap.from, leadingGap.to)),
+          el('div', { class: 'leg-title' },
+            `${nightsLabel(leadingGap.nights)} with nowhere booked`),
+          el('div', { class: 'leg-meta' }, 'Add a stay to cover this stretch.')
+        )
+      )
+    );
   }
-  sections.push(card('Where you are staying', ...stayChildren));
+
+  const routeChildren = [bulkPayerRow(), journey].filter(Boolean);
+  if (trip.canEdit) {
+    routeChildren.push(el('div', { style: 'margin-top:18px' }, itemForm('stays')));
+  }
+  sections.push(card('Route', ...routeChildren));
 
   // --- Activities ----------------------------------------------------------
   const actList = el('div');
@@ -694,14 +875,38 @@ function render(data) {
         'You are viewing a shared itinerary. Ask the trip owner for an edit link to make changes.')));
   }
 
+  // Sections are built in whatever order is convenient above, then arranged
+  // here. On a trip that moves around, the route is what you open the page for;
+  // money is the follow-up, and the share links matter least once they are sent.
+  const ORDER = ['Trip details', 'Notes', 'Route', 'Costs', 'Itinerary',
+    'Expenses', 'Places to go', 'Travellers', 'Share this trip', 'Access'];
+
+  const rank = (node) => {
+    const heading = node.querySelector('h2');
+    const index = heading ? ORDER.indexOf(heading.textContent) : -1;
+    return index === -1 ? ORDER.length : index;
+  };
+
+  sections.sort((a, b) => rank(a) - rank(b));
+
+  // The share card is the least important thing on the page once the links have
+  // been sent, so it recedes rather than competing with the trip itself.
+  const last = sections[sections.length - 1];
+  const lastHeading = last && last.querySelector('h2');
+  if (lastHeading && (lastHeading.textContent === 'Share this trip' || lastHeading.textContent === 'Access')) {
+    last.classList.add('card-quiet');
+  }
+
   content.replaceChildren(...sections);
 }
 
 api(`/api/trips/${token}`)
   .then(render)
   .catch((err) => {
-    document.getElementById('trip-name').textContent = 'Trip not found';
-    document.getElementById('trip-sub').textContent = err.message;
+    document.getElementById('hero').replaceChildren(
+      el('h1', {}, 'Trip not found'),
+      el('p', { class: 'row-meta' }, err.message)
+    );
   });
 </script>
 </body>

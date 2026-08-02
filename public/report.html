@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Report · Itinerary Planner</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-person="all">
+<div class="wrap">
+  <div id="content"><p class="empty">Loading…</p></div>
+</div>
+
+<script type="module">
+import { api, money, el } from '/app.js';
+import { card, hero, formatRange, formatDay, settlementLines, personTabs } from '/trip-ui.js';
+
+// This page is deliberately read-only and contains no share-link markup, so an
+// edit token cannot leak through it even when opened with one.
+
+const token = window.location.pathname.split('/').filter(Boolean)[1];
+const content = document.getElementById('content');
+
+let trip = null;
+let selected = new URLSearchParams(window.location.search).get('p') || 'all';
+
+// Splits a cost across its sharers the same way the server does, so a line item
+// and the summary total it rolls into can never disagree by a cent.
+function splitCents(totalCents, people) {
+  if (people <= 0) return [];
+  const base = Math.floor(totalCents / people);
+  let remainder = totalCents - base * people;
+  const shares = new Array(people).fill(base);
+  for (let i = 0; remainder > 0; i += 1, remainder -= 1) shares[i] += 1;
+  return shares;
+}
+
+function toCents(value) {
+  if (value === '' || value === null || value === undefined) return 0;
+  const n = Number(String(value).replace(/[^0-9.-]/g, ''));
+  return Number.isFinite(n) ? Math.round(n * 100) : 0;
+}
+
+function sharersOf(item) {
+  const known = new Set(trip.travellers.map((t) => t.id));
+  const named = (item.sharedBy || []).filter((id) => known.has(id));
+  return named.length ? named : trip.travellers.map((t) => t.id);
+}
+
+const COLLECTION_LABELS = { stays: 'Stays', activities: 'Itinerary', expenses: 'Expenses' };
+
+function ledgerFor(travellerId) {
+  const groups = [];
+
+  for (const [collection, list] of [
+    ['stays', trip.stays],
+    ['activities', trip.activities],
+    ['expenses', trip.expenses || []],
+  ]) {
+    const rows = [];
+    for (const item of list) {
+      const cents = toCents(item.cost);
+      const sharers = sharersOf(item);
+      const index = sharers.indexOf(travellerId);
+      const paidByMe = item.paidBy === travellerId;
+      if (index === -1 && !paidByMe) continue;
+
+      rows.push({
+        name: item.name,
+        date: item.checkIn || item.date || '',
+        costCents: cents,
+        shareCents: index === -1 ? 0 : splitCents(cents, sharers.length)[index],
+        sharerCount: sharers.length,
+        paidByMe,
+      });
+    }
+    if (rows.length) {
+      rows.sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999'));
+      groups.push({ collection, label: COLLECTION_LABELS[collection], rows });
+    }
+  }
+
+  return groups;
+}
+
+function ledgerTable(group, cur) {
+  const table = el('table', { class: 'ledger' });
+
+  table.append(el('thead', {},
+    el('tr', {},
+      el('th', {}, group.label),
+      el('th', { class: 'num' }, 'Cost'),
+      el('th', { class: 'num' }, 'Your share')
+    )
+  ));
+
+  const body = el('tbody');
+  let subtotal = 0;
+
+  for (const row of group.rows) {
+    subtotal += row.shareCents;
+    const detail = [
+      row.date ? formatDay(row.date) : null,
+      row.sharerCount > 1 ? `split ${row.sharerCount} ways` : 'just you',
+      row.paidByMe ? 'you paid' : null,
+    ].filter(Boolean).join(' · ');
+
+    body.append(
+      el('tr', {},
+        el('td', {},
+          el('div', {}, row.name),
+          detail ? el('div', { class: 'sub' }, detail) : null
+        ),
+        el('td', { class: 'num' }, money(row.costCents, cur)),
+        el('td', { class: 'num' }, money(row.shareCents, cur))
+      )
+    );
+  }
+
+  table.append(body);
+  table.append(el('tfoot', {},
+    el('tr', {},
+      el('td', {}, `${group.label} subtotal`),
+      el('td', { class: 'num' }, ''),
+      el('td', { class: 'num' }, money(subtotal, cur))
+    )
+  ));
+
+  return table;
+}
+
+function verdictFor(balance, settlement, cur) {
+  const owes = settlement.transfers.filter((t) => t.fromId === balance.id);
+  const owedBy = settlement.transfers.filter((t) => t.toId === balance.id);
+
+  // With costs still unattributed there is no counterparty to name, so the
+  // report states the share and says plainly what is missing.
+  if (settlement.unpaidCents > 0 && !owes.length && !owedBy.length) {
+    return el('div', { class: 'verdict verdict-unpaid' },
+      el('div', { class: 'verdict-head' },
+        `${money(settlement.unpaidCents, cur)} has no payer recorded yet`),
+      el('p', {}, `Your share of the trip so far is ${money(balance.oweCents, cur)}. `
+        + 'Once each cost says who paid for it, this becomes a list of who to pay.')
+    );
+  }
+
+  if (owes.length) {
+    return el('div', { class: 'verdict verdict-owe' },
+      el('div', { class: 'verdict-head' }, `You owe ${money(-balance.netCents, cur)}`),
+      el('p', {}, owes.map((t) => `Pay ${t.toName} ${money(t.cents, cur)}`).join(' · '))
+    );
+  }
+
+  if (owedBy.length) {
+    return el('div', { class: 'verdict verdict-owed' },
+      el('div', { class: 'verdict-head' }, `You are owed ${money(balance.netCents, cur)}`),
+      el('p', {}, owedBy.map((t) => `${t.fromName} pays you ${money(t.cents, cur)}`).join(' · '))
+    );
+  }
+
+  return el('div', { class: 'verdict' },
+    el('div', { class: 'verdict-head' }, 'You are square'),
+    el('p', {}, 'Nothing to pay, nothing to collect.')
+  );
+}
+
+function personReport(balance) {
+  const cur = trip.currency;
+  const s = trip.summary;
+  const groups = ledgerFor(balance.id);
+
+  const section = el('section', {
+    class: selected === balance.id ? 'person-report is-selected' : 'person-report',
+    'data-person': balance.id,
+  });
+
+  section.append(el('h1', {}, `${balance.name} — ${trip.name}`));
+  section.append(el('p', { class: 'hero-sub' },
+    [formatRange(trip.startDate, trip.endDate), trip.destination].filter(Boolean).join(' · ')));
+
+  section.append(verdictFor(balance, s.settlement, cur));
+
+  // The arithmetic, so anyone can check the result by hand.
+  section.append(card('Your position',
+    el('div', { class: 'sum-line' },
+      el('span', {}, 'You paid'), el('span', {}, money(balance.paidCents, cur))),
+    el('div', { class: 'sum-line' },
+      el('span', {}, 'Your share of the costs'), el('span', {}, `− ${money(balance.oweCents, cur)}`)),
+    el('div', { class: 'sum-line sum-total' },
+      el('span', {}, balance.netCents >= 0 ? 'You are owed' : 'You owe'),
+      el('span', {}, money(Math.abs(balance.netCents), cur)))
+  ));
+
+  if (groups.length) {
+    const tables = groups.map((g) => ledgerTable(g, cur));
+    section.append(card('What makes up your share', ...tables));
+  } else {
+    section.append(card('What makes up your share',
+      el('p', { class: 'empty' }, 'No costs recorded against this person yet.')));
+  }
+
+  // The whole group's position, so the recipient can see the full picture
+  // rather than having to take their own number on trust.
+  const groupTable = el('table', { class: 'ledger' });
+  groupTable.append(el('thead', {},
+    el('tr', {},
+      el('th', {}, 'Traveller'),
+      el('th', { class: 'num' }, 'Paid'),
+      el('th', { class: 'num' }, 'Share'),
+      el('th', { class: 'num' }, 'Net')
+    )
+  ));
+  const groupBody = el('tbody');
+  for (const b of s.balances) {
+    groupBody.append(
+      el('tr', {},
+        el('td', {}, b.name),
+        el('td', { class: 'num' }, money(b.paidCents, cur)),
+        el('td', { class: 'num' }, money(b.oweCents, cur)),
+        el('td', { class: 'num' },
+          el('span', { class: b.netCents > 0 ? 'net-pos' : b.netCents < 0 ? 'net-neg' : '' },
+            money(b.netCents, cur)))
+      )
+    );
+  }
+  groupTable.append(groupBody);
+
+  section.append(card('Where the group stands', groupTable,
+    el('div', { style: 'margin-top:14px' }, settlementLines(s.settlement, cur))));
+
+  section.append(el('div', { class: 'report-foot' },
+    `${trip.name} · generated ${formatDay(new Date().toISOString().slice(0, 10), { year: true })}`));
+
+  return section;
+}
+
+function selectPerson(id) {
+  selected = id;
+  document.body.dataset.person = id;
+
+  const url = new URL(window.location.href);
+  if (id === 'all') url.searchParams.delete('p');
+  else url.searchParams.set('p', id);
+  history.replaceState(null, '', url);
+
+  for (const node of document.querySelectorAll('.person-report')) {
+    node.classList.toggle('is-selected', node.dataset.person === id);
+  }
+  for (const tab of document.querySelectorAll('.person-tabs .chip')) {
+    tab.setAttribute('aria-pressed', String(tab.dataset.person === id));
+  }
+}
+
+function render(data) {
+  trip = data;
+  document.title = `${trip.name} — report`;
+
+  const balances = trip.summary.balances;
+  if (!balances.length) {
+    content.replaceChildren(
+      hero(trip, {}),
+      card('No travellers yet',
+        el('p', { class: 'empty' },
+          'Add travellers to the trip and their reports will appear here.'),
+        el('a', { href: `/t/${token}` }, '← Back to the trip'))
+    );
+    return;
+  }
+
+  if (selected !== 'all' && !balances.some((b) => b.id === selected)) selected = 'all';
+  document.body.dataset.person = selected;
+
+  const controls = el('div', { class: 'no-print' },
+    personTabs(trip.travellers, selected, selectPerson)
+  );
+
+  const printButton = el('button', { type: 'button' }, 'Print / Save as PDF');
+  printButton.addEventListener('click', () => window.print());
+
+  const actions = el('div', { class: 'no-print', style: 'display:flex;gap:8px;flex-wrap:wrap;margin-bottom:22px' },
+    printButton,
+    el('a', { href: `/t/${token}`, style: 'align-self:center' }, '← Back to the trip')
+  );
+
+  content.replaceChildren(controls, actions, ...balances.map(personReport));
+}
+
+api(`/api/trips/${token}`)
+  .then(render)
+  .catch((err) => {
+    content.replaceChildren(
+      el('h1', {}, 'Report unavailable'),
+      el('p', { class: 'row-meta' }, err.message)
+    );
+  });
+</script>
+</body>
+</html>

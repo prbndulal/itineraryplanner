@@ -3,7 +3,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import * as store from './store.js';
 import * as places from './places.js';
-import { summarise, nightsBetween, formatCents } from './costs.js';
+import { summarise, nightsBetween, formatCents, settle, accommodationGaps } from './costs.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -28,7 +28,13 @@ function present(trip, canEdit) {
     stays,
     editToken: canEdit ? trip.editToken : undefined,
     canEdit,
-    summary,
+    // Settlement and gaps derive only from data a view token already receives,
+    // so including them here exposes nothing new to a read-only link.
+    summary: {
+      ...summary,
+      settlement: settle(summary.balances),
+      gaps: accommodationGaps(trip),
+    },
   };
 }
 
@@ -99,7 +105,9 @@ function cleanSharedBy(value, travellers) {
   return [...seen];
 }
 
-function buildItem(collection, body, trip) {
+// `requireName` is true when creating, where a name must be supplied, and false
+// when patching, where an absent field means "leave it as it is".
+function buildItem(collection, body, trip, { requireName = true } = {}) {
   const allowed = COLLECTION_FIELDS[collection];
   if (!allowed) return { error: 'Unknown section' };
 
@@ -108,7 +116,10 @@ function buildItem(collection, body, trip) {
     if (field in body) item[field] = cleanText(body[field]);
   }
 
-  if (!item.name) return { error: 'Name is required' };
+  // A PATCH may carry a single field — assigning a payer sends only `paidBy` —
+  // so an absent name means "leave it alone", not "clear it". Sending an empty
+  // name is still rejected either way.
+  if ((requireName || 'name' in body) && !item.name) return { error: 'Name is required' };
 
   if ('mapUrl' in body) {
     const url = safeMapUrl(body.mapUrl);
@@ -245,7 +256,7 @@ app.post('/api/trips/:token/:collection', resolve, requireEdit, async (req, res,
 app.patch('/api/trips/:token/:collection/:itemId', resolve, requireEdit, async (req, res, next) => {
   try {
     const { collection, itemId } = req.params;
-    const { item, error } = buildItem(collection, req.body || {}, req.trip);
+    const { item, error } = buildItem(collection, req.body || {}, req.trip, { requireName: false });
     if (error) return res.status(400).json({ error });
     const updated = await store.updateItem(req.trip.id, collection, itemId, item);
     if (!updated) return res.status(404).json({ error: 'Item not found' });
@@ -272,6 +283,13 @@ app.get('/healthz', (req, res) => res.json({ ok: true }));
 // Share links are client-rendered; serve the app shell for /t/<token>.
 app.get('/t/:token', (req, res) => {
   res.sendFile(join(__dirname, '..', 'public', 'trip.html'));
+});
+
+// The report page fetches its data from /api/trips/:token like the trip page
+// does, so it inherits that route's access control rather than adding its own.
+// Serving a static shell here means no token is ever rendered into the HTML.
+app.get('/t/:token/report', (req, res) => {
+  res.sendFile(join(__dirname, '..', 'public', 'report.html'));
 });
 
 // Database errors surface here. The message is logged but never returned to the

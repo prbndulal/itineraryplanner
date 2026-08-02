@@ -7,6 +7,13 @@
   --accent: #2f6f4f;
   --accent-soft: #e8f2ec;
   --danger: #b3261e;
+  /* Amber, for nights with nothing booked. Deliberately not --danger: an
+     unbooked stretch is something still to do, not something broken. */
+  --warn: #8a5a00;
+  --warn-soft: #fdf3e0;
+  --warn-border: #e9c884;
+  --rail: #d3d8de;
+  --chip-bg: #eef1f4;
   --radius: 10px;
   --shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 4px 12px rgba(16, 24, 40, 0.04);
 }
@@ -21,6 +28,11 @@
     --accent: #6cc295;
     --accent-soft: #1f2f27;
     --danger: #f2837c;
+    --warn: #e3b264;
+    --warn-soft: #2c2317;
+    --warn-border: #55432a;
+    --rail: #39414a;
+    --chip-bg: #262c32;
     --shadow: none;
   }
 }
@@ -166,4 +178,261 @@ a { color: var(--accent); }
   .row { flex-direction: column; gap: 6px; }
   .row-side { text-align: left; }
   .row-actions { justify-content: flex-start; margin-left: -6px; }
+}
+
+/* --- hero ---------------------------------------------------------------- */
+
+.hero {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 22px;
+  margin-bottom: 18px;
+}
+
+.hero h1 { margin: 0 0 4px; font-size: 27px; letter-spacing: -0.02em; line-height: 1.15; }
+.hero-sub { color: var(--muted); margin-bottom: 18px; }
+
+.hero-tiles {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+}
+
+.tile { background: var(--accent-soft); border-radius: 8px; padding: 12px 14px; }
+.tile.tile-warn { background: var(--warn-soft); border: 1px solid var(--warn-border); }
+.tile .k {
+  font-size: 12px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.tile .v { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; margin-top: 3px; }
+.tile.tile-warn .v { color: var(--warn); }
+
+/* A quieter card for things that shouldn't compete with the trip itself. */
+.card-quiet { box-shadow: none; background: transparent; }
+.card-quiet h2 { opacity: 0.75; }
+
+/* --- journey timeline ---------------------------------------------------- */
+
+.journey { list-style: none; margin: 0; padding: 0; }
+
+.leg { position: relative; padding: 0 0 22px 30px; }
+.leg:last-child { padding-bottom: 0; }
+
+/* The dot marks the stop; the line joins it to the next one. A solid line means
+   the dates run straight on from each other, so a road trip reads as continuous. */
+.leg::before {
+  content: '';
+  position: absolute;
+  left: 5px; top: 6px;
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.leg::after {
+  content: '';
+  position: absolute;
+  left: 9px; top: 19px; bottom: 2px;
+  border-left: 2px solid var(--rail);
+}
+
+.leg:last-child::after { display: none; }
+.leg-gap::before { background: var(--warn); }
+.leg-gap::after, .leg-break::after { border-left-style: dashed; }
+
+.leg-when {
+  font-size: 12px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.leg-title { font-weight: 600; font-size: 16px; margin-top: 2px; }
+.leg-meta { color: var(--muted); font-size: 13px; margin-top: 2px; word-break: break-word; }
+
+.leg-money { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-top: 5px; }
+.rate { color: var(--muted); font-size: 13px; }
+
+.rate-best {
+  display: inline-block; padding: 1px 8px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent);
+  font-size: 12px; font-weight: 600;
+}
+
+.leg-gap .leg-body {
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.leg-gap .leg-title { color: var(--warn); font-size: 15px; }
+
+/* --- chips --------------------------------------------------------------- */
+
+.chip-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
+.chip-label { font-size: 12px; color: var(--muted); margin-right: 2px; }
+
+.chip {
+  font: inherit; font-size: 13px; font-weight: 500;
+  padding: 5px 11px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--chip-bg); color: var(--text);
+  cursor: pointer;
+}
+
+.chip:hover { border-color: var(--accent); }
+.chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.chip[disabled] { opacity: 0.6; cursor: default; }
+
+/* Read-only sharer markers, so a cost split between a subset is visible
+   without a sentence explaining it. */
+.chip-static {
+  display: inline-block; padding: 2px 9px; border-radius: 999px;
+  background: var(--chip-bg); color: var(--muted); font-size: 12px;
+}
+
+/* --- settlement ---------------------------------------------------------- */
+
+.settlement { margin-top: 16px; }
+
+.settle-line {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  padding: 9px 0; border-bottom: 1px solid var(--border);
+}
+.settle-line:last-child { border-bottom: none; }
+.settle-who { font-weight: 600; }
+.settle-arrow { color: var(--muted); }
+
+.notice {
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-top: 14px;
+}
+.notice strong { color: var(--warn); }
+.notice p { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
+
+/* --- reports ------------------------------------------------------------- */
+
+.person-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+
+.person-report { margin-bottom: 26px; }
+
+/* One person at a time on screen; the same rule drives what gets printed. */
+body[data-person="all"] .person-report { display: block; }
+body:not([data-person="all"]) .person-report { display: none; }
+body:not([data-person="all"]) .person-report.is-selected { display: block; }
+
+.verdict {
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  padding: 18px 20px;
+  margin-bottom: 18px;
+}
+.verdict-head { font-size: 21px; font-weight: 650; letter-spacing: -0.01em; }
+.verdict p { margin: 6px 0 0; color: var(--muted); font-size: 14px; }
+.verdict-owed { background: var(--accent-soft); border-color: var(--accent); }
+.verdict-owed .verdict-head { color: var(--accent); }
+.verdict-owe { background: var(--surface); border-color: var(--danger); }
+.verdict-owe .verdict-head { color: var(--danger); }
+.verdict-unpaid { background: var(--warn-soft); border-color: var(--warn-border); }
+.verdict-unpaid .verdict-head { color: var(--warn); }
+
+/* A real table: it prints across page breaks properly and reads correctly to a
+   screen reader, which stacked flex rows do not. */
+.ledger { width: 100%; border-collapse: collapse; margin-top: 6px; }
+.ledger th, .ledger td { padding: 8px 6px; border-bottom: 1px solid var(--border); text-align: left; }
+.ledger th {
+  font-size: 12px; color: var(--muted); font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.ledger td.num, .ledger th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ledger tfoot td { font-weight: 650; border-bottom: none; border-top: 2px solid var(--border); }
+.ledger .sub { color: var(--muted); font-size: 12px; }
+
+.sum-line {
+  display: flex; justify-content: space-between; gap: 16px;
+  padding: 7px 0; border-bottom: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+.sum-line:last-child { border-bottom: none; }
+.sum-line.sum-total { font-weight: 650; border-top: 2px solid var(--border); border-bottom: none; }
+
+.report-foot { margin-top: 26px; color: var(--muted); font-size: 12px; }
+
+/* --- narrow screens ------------------------------------------------------ */
+
+@media (max-width: 560px) {
+  .hero { padding: 18px; }
+  .hero h1 { font-size: 23px; }
+  .leg { padding-left: 24px; }
+  .leg::before { left: 2px; }
+  .leg::after { left: 6px; }
+  /* Tap targets: chips are the primary control on a phone. */
+  .chip { padding: 9px 14px; font-size: 14px; }
+  .ledger th, .ledger td { padding: 7px 4px; font-size: 13px; }
+}
+
+@media (max-width: 380px) {
+  .hero-tiles { grid-template-columns: 1fr 1fr; }
+  .tile .v { font-size: 17px; }
+}
+
+/* --- print --------------------------------------------------------------- */
+
+/* This block is last on purpose. The dark-mode block above still matches when
+   printing from a machine in dark mode, which would otherwise put white text on
+   a black page; redeclaring the light values here wins on cascade order. */
+@media print {
+  :root {
+    --bg: #ffffff;
+    --surface: #ffffff;
+    --border: #b9bec4;
+    --text: #000000;
+    --muted: #444444;
+    --accent: #1a5c3a;
+    --accent-soft: #f1f4f2;
+    --danger: #8c1d18;
+    --warn: #6b4500;
+    --warn-soft: #f8f4ea;
+    --warn-border: #c9ab72;
+    --rail: #9aa1a8;
+    --chip-bg: #f2f4f6;
+    --shadow: none;
+  }
+
+  body { background: #fff; color: #000; font-size: 11pt; line-height: 1.4; }
+  .wrap { max-width: none; padding: 0; }
+
+  @page { margin: 14mm; size: A4; }
+
+  /* Anything interactive is meaningless on paper. Map links go too: a printed
+     "Open map" is dead text, so the address carries the location instead. */
+  button, form, .person-tabs, .chip-row, .row-actions, .share, .maplink, .no-print {
+    display: none !important;
+  }
+
+  .card, .hero, .verdict {
+    box-shadow: none;
+    border: 1px solid var(--border);
+    border-radius: 0;
+    padding: 10px 12px;
+  }
+
+  /* One person per page when printing the whole group. */
+  .person-report { break-before: page; page-break-before: always; }
+  .person-report:first-of-type { break-before: auto; page-break-before: auto; }
+
+  .card, .leg, .settle-line, .sum-line, tr, .verdict {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  h1, h2, h3 { break-after: avoid; page-break-after: avoid; }
+  thead { display: table-header-group; }
+
+  /* Only where the fill itself carries the meaning. Everything else reads from
+     borders and words, so an unticked "background graphics" box still prints
+     something correct. */
+  .verdict, .leg-gap .leg-body { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+
+  a { color: inherit; text-decoration: none; }
 }
