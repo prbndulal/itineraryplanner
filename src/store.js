@@ -203,6 +203,9 @@ const COLUMNS = {
   paidTo: 'shared_by',
   done: 'category',
   slot: 'category',
+  // Who is bringing a packing item. Shares paid_by with the payer of a cost,
+  // which also means forgetTraveller() already clears it when someone leaves.
+  assignedTo: 'paid_by',
   email: 'email',
   mapUrl: 'map_url',
   notes: 'notes',

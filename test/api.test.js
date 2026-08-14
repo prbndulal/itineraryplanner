@@ -876,3 +876,103 @@ test('a read-only link cannot add a meal', async () => {
   const res = await call('POST', `/api/trips/${trip.viewToken}/meals`, { name: 'Sneaky supper' });
   assert.equal(res.status, 403);
 });
+
+// --- who is bringing what ---------------------------------------------------
+
+test('a packing item can be assigned to someone and reassigned', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  const withA = await call('POST', `/api/trips/${t}/travellers`, { name: 'Bharat' });
+  const bharat = withA.body.travellers[0].id;
+  const withB = await call('POST', `/api/trips/${t}/travellers`, { name: 'Ashish' });
+  const ashish = withB.body.travellers.find((x) => x.name === 'Ashish').id;
+
+  const added = await call('POST', `/api/trips/${t}/packing`, { name: 'Pressure Cooker' });
+  const itemId = added.body.packing[0].id;
+  assert.equal(added.body.packing[0].assignedTo, '', 'nobody is bringing it yet');
+
+  const assigned = await call('PATCH', `/api/trips/${t}/packing/${itemId}`, { assignedTo: bharat });
+  assert.equal(assigned.status, 200);
+  assert.equal(assigned.body.packing[0].assignedTo, bharat);
+  assert.equal(assigned.body.packing[0].name, 'Pressure Cooker', 'the name survives');
+
+  const moved = await call('PATCH', `/api/trips/${t}/packing/${itemId}`, { assignedTo: ashish });
+  assert.equal(moved.body.packing[0].assignedTo, ashish);
+
+  // Tapping the selected chip again sends an empty string.
+  const cleared = await call('PATCH', `/api/trips/${t}/packing/${itemId}`, { assignedTo: '' });
+  assert.equal(cleared.body.packing[0].assignedTo, '');
+});
+
+test('assigning an item leaves its packed state alone', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  const withA = await call('POST', `/api/trips/${t}/travellers`, { name: 'Prabin' });
+  const prabin = withA.body.travellers[0].id;
+
+  const added = await call('POST', `/api/trips/${t}/packing`, { name: 'Rice Cooker' });
+  const itemId = added.body.packing[0].id;
+  await call('PATCH', `/api/trips/${t}/packing/${itemId}`, { done: true });
+
+  // done and assignedTo share nothing, but both are single-field patches on the
+  // same row, so it is worth pinning that one cannot clobber the other.
+  const assigned = await call('PATCH', `/api/trips/${t}/packing/${itemId}`, { assignedTo: prabin });
+  assert.equal(assigned.body.packing[0].done, true, 'still packed');
+  assert.equal(assigned.body.packing[0].assignedTo, prabin);
+
+  const ticked = await call('PATCH', `/api/trips/${t}/packing/${itemId}`, { done: false });
+  assert.equal(ticked.body.packing[0].assignedTo, prabin, 'still assigned');
+  assert.equal(ticked.body.packing[0].done, false);
+});
+
+test('an item cannot be assigned to someone on another trip', async () => {
+  const trip = await makeTrip();
+  const other = await makeTrip('Somewhere else');
+
+  const stranger = await call('POST', `/api/trips/${other.editToken}/travellers`, { name: 'Nobody' });
+  const strangerId = stranger.body.travellers[0].id;
+
+  const added = await call('POST', `/api/trips/${trip.editToken}/packing`, { name: 'Tent' });
+  const itemId = added.body.packing[0].id;
+
+  const res = await call('PATCH', `/api/trips/${trip.editToken}/packing/${itemId}`,
+    { assignedTo: strangerId });
+
+  // The id is stored but names nobody on this trip, so the UI shows it as
+  // unassigned rather than attributing it to a stranger.
+  const reread = await call('GET', `/api/trips/${trip.editToken}`);
+  const names = new Set(reread.body.travellers.map((x) => x.id));
+  assert.ok(!names.has(reread.body.packing[0].assignedTo),
+    'an outsider must never read as one of the travellers');
+  assert.equal(res.status, 200);
+});
+
+test('removing a traveller unassigns what they were bringing', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  const withA = await call('POST', `/api/trips/${t}/travellers`, { name: 'Bharat' });
+  const bharat = withA.body.travellers[0].id;
+
+  const added = await call('POST', `/api/trips/${t}/packing`, { name: 'Knife and Chopping Board' });
+  const itemId = added.body.packing[0].id;
+  await call('PATCH', `/api/trips/${t}/packing/${itemId}`, { assignedTo: bharat });
+
+  const after = await call('DELETE', `/api/trips/${t}/travellers/${bharat}`);
+  assert.equal(after.status, 200);
+  assert.equal(after.body.packing.length, 1, 'the item itself stays on the list');
+  assert.equal(after.body.packing[0].assignedTo, '', 'but nobody is bringing it now');
+});
+
+test('a read-only link cannot assign a packing item', async () => {
+  const trip = await makeTrip();
+  const withA = await call('POST', `/api/trips/${trip.editToken}/travellers`, { name: 'Prabin' });
+  const prabin = withA.body.travellers[0].id;
+  const added = await call('POST', `/api/trips/${trip.editToken}/packing`, { name: 'Towel' });
+
+  const res = await call('PATCH', `/api/trips/${trip.viewToken}/packing/${added.body.packing[0].id}`,
+    { assignedTo: prabin });
+  assert.equal(res.status, 403);
+});

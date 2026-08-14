@@ -32,15 +32,16 @@ function card(title, ...children) {
   return el('div', { class: 'card' }, el('h2', {}, title), ...children);
 }
 
-// One tap to record who paid for something. The alternative is opening the row's
-// editor and saving it, which is far too slow for setting a payer on every stay.
-function payerChips(collection, item) {
+// One tap to attach a person to an item — who paid for a cost, or who is
+// bringing something on the packing list. The alternative is opening the row's
+// editor and saving it, which is far too slow to do for every line.
+function personChips(collection, item, field, label) {
   if (!trip.canEdit || !trip.travellers.length) return null;
 
-  const row = el('div', { class: 'chip-row' }, el('span', { class: 'chip-label' }, 'Paid by'));
+  const row = el('div', { class: 'chip-row' }, el('span', { class: 'chip-label' }, label));
 
   for (const traveller of trip.travellers) {
-    const selected = item.paidBy === traveller.id;
+    const selected = item[field] === traveller.id;
     const chip = el('button', {
       type: 'button',
       class: 'chip',
@@ -50,10 +51,10 @@ function payerChips(collection, item) {
     chip.addEventListener('click', async () => {
       for (const button of row.querySelectorAll('button')) button.disabled = true;
       try {
-        // Tapping the current payer clears it, so a mistake is one tap to undo.
+        // Tapping the current choice clears it, so a mistake is one tap to undo.
         render(await api(`/api/trips/${token}/${collection}/${item.id}`, {
           method: 'PATCH',
-          body: JSON.stringify({ paidBy: selected ? '' : traveller.id }),
+          body: JSON.stringify({ [field]: selected ? '' : traveller.id }),
         }));
       } catch (err) {
         alert(err.message);
@@ -66,6 +67,8 @@ function payerChips(collection, item) {
 
   return row;
 }
+
+const payerChips = (collection, item) => personChips(collection, item, 'paidBy', 'Paid by');
 
 // Assigns every cost that has no payer yet in one go, for the common case where
 // one person fronted the whole trip.
@@ -486,7 +489,8 @@ function mapLink(url) {
   return el('a', { class: 'maplink', href: url, target: '_blank', rel: 'noopener noreferrer' }, 'Open map ↗');
 }
 
-function payerName(id) {
+// Traveller id to name, for payers, assignees and anyone else attached to a row.
+function travellerName(id) {
   const match = trip.travellers.find((t) => t.id === id);
   return match ? match.name : null;
 }
@@ -494,9 +498,9 @@ function payerName(id) {
 // Only worth showing when a cost is *not* shared by everyone; saying "shared by
 // Bharat, Ashish, Prabin" on every line when that is the default is just noise.
 function sharedLabel(item) {
-  const named = (item.sharedBy || []).filter((id) => payerName(id));
+  const named = (item.sharedBy || []).filter((id) => travellerName(id));
   if (!named.length || named.length === trip.travellers.length) return null;
-  return `Split between ${named.map(payerName).join(', ')}`;
+  return `Split between ${named.map(travellerName).join(', ')}`;
 }
 
 // --- Place suggestions ------------------------------------------------------
@@ -835,8 +839,8 @@ function render(data) {
                 ? el('span', { class: 'rate-best' }, 'best rate')
                 : null
             ),
-            payerName(stay.paidBy)
-              ? el('div', { class: 'leg-meta' }, `Paid by ${payerName(stay.paidBy)}`)
+            travellerName(stay.paidBy)
+              ? el('div', { class: 'leg-meta' }, `Paid by ${travellerName(stay.paidBy)}`)
               : null,
             sharedLabel(stay) ? el('div', { class: 'leg-meta shared' }, sharedLabel(stay)) : null,
             stay.notes ? el('div', { class: 'leg-meta' }, stay.notes) : null,
@@ -998,7 +1002,7 @@ function render(data) {
           el('div', { class: 'row-main' },
             el('div', { class: 'row-title' }, act.name),
             meta ? el('div', { class: 'row-meta' }, meta) : null,
-            payerName(act.paidBy) ? el('div', { class: 'row-meta' }, `Paid by ${payerName(act.paidBy)}`) : null,
+            travellerName(act.paidBy) ? el('div', { class: 'row-meta' }, `Paid by ${travellerName(act.paidBy)}`) : null,
             sharedLabel(act) ? el('div', { class: 'row-meta shared' }, sharedLabel(act)) : null,
             act.notes ? el('div', { class: 'row-meta' }, act.notes) : null,
             mapLink(act.mapUrl),
@@ -1045,7 +1049,7 @@ function render(data) {
           el('div', { class: 'row-main' },
             el('div', { class: 'row-title' }, exp.name),
             meta ? el('div', { class: 'row-meta' }, meta) : null,
-            payerName(exp.paidBy) ? el('div', { class: 'row-meta' }, `Paid by ${payerName(exp.paidBy)}`) : null,
+            travellerName(exp.paidBy) ? el('div', { class: 'row-meta' }, `Paid by ${travellerName(exp.paidBy)}`) : null,
             sharedLabel(exp) ? el('div', { class: 'row-meta shared' }, sharedLabel(exp)) : null,
             exp.notes ? el('div', { class: 'row-meta' }, exp.notes) : null
           ),
@@ -1127,11 +1131,17 @@ function render(data) {
         }
       });
 
+      // Shown to everyone; the chips below are only rendered for an edit link,
+      // so a read-only viewer still sees who is bringing what.
+      const bringer = travellerName(entry.assignedTo);
+
       packList.append(makeDraggable(
         el('div', { class: entry.done ? 'row packed' : 'row' },
           el('div', { class: 'row-main' },
             el('label', { class: 'sharer' }, box, el('span', { class: 'row-title' }, entry.name)),
-            entry.notes ? el('div', { class: 'row-meta' }, entry.notes) : null
+            bringer ? el('div', { class: 'row-meta' }, `${bringer} is bringing this`) : null,
+            entry.notes ? el('div', { class: 'row-meta' }, entry.notes) : null,
+            personChips('packing', entry, 'assignedTo', 'Who is bringing it')
           ),
           el('div', { class: 'row-side' },
             reorderButtons('packing', entry.id, index, packing.length),
@@ -1146,8 +1156,25 @@ function render(data) {
   const packChildren = [];
   if (packing.length) {
     const done = packing.filter((p) => p.done).length;
-    packChildren.push(el('div', { style: 'margin-bottom:10px' },
-      el('span', { class: 'chip-static' }, `${done} of ${packing.length} packed`)));
+    const summary = el('div', { class: 'chip-row', style: 'margin-bottom:12px' },
+      el('span', { class: 'chip-static' }, `${done} of ${packing.length} packed`));
+
+    // Who is carrying how much, so the load can be seen at a glance rather than
+    // by reading down the whole list.
+    for (const traveller of trip.travellers) {
+      const mine = packing.filter((p) => p.assignedTo === traveller.id);
+      if (!mine.length) continue;
+      const packed = mine.filter((p) => p.done).length;
+      summary.append(el('span', { class: 'chip-static' },
+        `${traveller.name}: ${packed}/${mine.length}`));
+    }
+
+    const unassigned = packing.filter((p) => !p.assignedTo).length;
+    if (unassigned && trip.travellers.length) {
+      summary.append(el('span', { class: 'chip-static' }, `${unassigned} unassigned`));
+    }
+
+    packChildren.push(summary);
   }
   packChildren.push(packList);
   if (trip.canEdit) {
@@ -1222,7 +1249,7 @@ function render(data) {
 
   if (payments.length) {
     const payList = el('div');
-    const nameOf = (id) => payerName(id) || 'someone';
+    const nameOf = (id) => travellerName(id) || 'someone';
 
     for (const payment of payments) {
       if (isEditing('payments', payment.id)) {

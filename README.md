@@ -12,7 +12,7 @@ Plan a trip, track what it costs, and share it with everyone coming along.
   what is planned, and what it costs
 - **Settling up** — turns the balances into "X pays Y" so the group can square up
 - **Payments** — record a repayment and watch the debt shrink; never counted as a trip cost
-- **Packing list** — a shared checklist everyone can see and the trip owner can tick
+- **Packing list** — a shared checklist: tick things off and say who is bringing what
 - **Meals** — what you plan to eat on each day, grouped by date
 - **Reordering** — drag a row on a desktop, or use the ↑↓ buttons anywhere
 - **Reports** — a printable per-person statement of what they owe or are owed
@@ -179,6 +179,17 @@ nothing is lost where dragging is unavailable — including for keyboard users.
 different questions: the plan lives in Meals, the money lives in Expenses. Any
 number of sittings can go on a day rather than a fixed breakfast/lunch/dinner,
 because morning tea and supper are meals too.
+
+**Several API fields deliberately share a database column.** Every kind lives in
+one table, so `paidBy` and `assignedTo` both write `paid_by`, `paidTo` and
+`sharedBy` both write `shared_by`, and `done` and `slot` both write `category`.
+That is only safe because `COLLECTION_FIELDS` never offers two of them to the
+same kind — offering `paidBy` to the packing list would silently overwrite who
+is bringing something. Reuse also buys cleanup for free: because assignments sit
+in `paid_by`, removing a traveller already unassigns whatever they were
+bringing. A field that is read in `rowToItem` but missing from `COLUMNS` can be
+displayed and never saved, which is worth checking whenever a kind gains a
+field.
 
 **Item writes are scoped by trip.** Update and delete queries match on
 `trip_id` as well as item id, so a token for one trip cannot touch another
