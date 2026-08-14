@@ -110,7 +110,107 @@ function bulkPayerRow() {
   return el('div', { style: 'margin-bottom:16px' }, row);
 }
 
+async function moveItem(collection, itemId, toIndex) {
+  return api(`/api/trips/${token}/${collection}/${itemId}/move`, {
+    method: 'PATCH',
+    body: JSON.stringify({ toIndex }),
+  });
+}
+
+// Move up / move down. Dragging is the nicer gesture on a laptop but it is not
+// dependable on a touch screen without a library, so these buttons are the way
+// that always works — on a phone, and with a keyboard.
+function reorderButtons(collection, itemId, index, length) {
+  if (!trip.canEdit || length < 2) return null;
+
+  const nudge = (label, target, enabled, description) => {
+    const button = el('button', {
+      type: 'button',
+      class: 'link move',
+      title: description,
+      'aria-label': description,
+    }, label);
+
+    if (!enabled) {
+      button.disabled = true;
+    } else {
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        try {
+          render(await moveItem(collection, itemId, target));
+        } catch (err) {
+          alert(err.message);
+          button.disabled = false;
+        }
+      });
+    }
+    return button;
+  };
+
+  return el('span', { class: 'move-buttons' },
+    nudge('↑', index - 1, index > 0, 'Move up'),
+    nudge('↓', index + 1, index < length - 1, 'Move down')
+  );
+}
+
+// Native drag and drop, for a mouse. Everything it does is also reachable
+// through the buttons above, so a browser that ignores this loses nothing.
+let dragging = null;
+
+function makeDraggable(row, collection, index) {
+  if (!trip.canEdit) return row;
+
+  row.setAttribute('draggable', 'true');
+  row.classList.add('draggable');
+
+  row.addEventListener('dragstart', (event) => {
+    dragging = { collection, index };
+    event.dataTransfer.effectAllowed = 'move';
+    // Firefox ignores a drag that carries no data.
+    event.dataTransfer.setData('text/plain', String(index));
+    row.classList.add('is-dragging');
+  });
+
+  row.addEventListener('dragend', () => {
+    dragging = null;
+    row.classList.remove('is-dragging');
+    for (const node of document.querySelectorAll('.drop-target')) {
+      node.classList.remove('drop-target');
+    }
+  });
+
+  row.addEventListener('dragover', (event) => {
+    // Only within the same list: dragging a meal into the packing list would
+    // mean nothing.
+    if (!dragging || dragging.collection !== collection) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    row.classList.add('drop-target');
+  });
+
+  row.addEventListener('dragleave', () => row.classList.remove('drop-target'));
+
+  row.addEventListener('drop', async (event) => {
+    if (!dragging || dragging.collection !== collection) return;
+    event.preventDefault();
+    row.classList.remove('drop-target');
+
+    const from = dragging.index;
+    dragging = null;
+    if (from === index) return;
+
+    try {
+      render(await moveItem(collection, (trip[collection] || [])[from].id, index));
+    } catch (err) {
+      alert(err.message);
+    }
+  });
+
+  return row;
+}
+
 const EXPENSE_CATEGORIES = ['Food & drink', 'Transport', 'Tickets', 'Shopping', 'Fees', 'Other'];
+const MEAL_SLOTS = ['Breakfast', 'Lunch', 'Dinner', 'Snacks'];
 
 // The same field list drives the add form and the edit form for a collection,
 // so anything that can be created can also be changed afterwards.
@@ -147,6 +247,15 @@ function fieldsFor(collection, cur) {
   }
   if (collection === 'packing') {
     return [{ key: 'name', label: 'Item', placeholder: 'Sunscreen' }];
+  }
+  if (collection === 'meals') {
+    return [
+      { key: 'name', label: 'What are we eating', placeholder: 'Dal bhat' },
+      { key: 'date', label: 'Day', type: 'date' },
+      // A datalist, not a fixed set: supper and morning tea are meals too.
+      { key: 'slot', label: 'Sitting', list: MEAL_SLOTS, placeholder: 'Dinner' },
+      { key: 'location', label: 'Where', placeholder: 'Cairns Airbnb' },
+    ];
   }
   if (collection === 'payments') {
     return [
@@ -798,10 +907,11 @@ function render(data) {
       if (departing) moves.push(`Leaving ${departing}`);
       if (arriving && day.stay) moves.push(`Arriving ${arriving}`);
 
-      const nothingHappening = !day.stay && !day.activities.length && !day.expenses.length;
+      const busy = day.activities.length + day.expenses.length + (day.meals || []).length;
+      const nothingHappening = !day.stay && !busy;
       const classes = ['leg'];
       if (!day.stay) classes.push('leg-gap');
-      else if (!day.activities.length && !day.expenses.length) classes.push('leg-quiet');
+      else if (!busy) classes.push('leg-quiet');
 
       const body = el('div', { class: 'leg-body' },
         el('div', { class: 'leg-when' }, heading),
@@ -809,6 +919,18 @@ function render(data) {
           day.stay ? day.stay.name : nothingHappening ? 'Nowhere booked' : 'No bed booked'),
         moves.length ? el('div', { class: 'leg-meta' }, moves.join(' · ')) : null
       );
+
+      for (const meal of day.meals || []) {
+        body.append(
+          el('div', { class: 'row' },
+            el('div', { class: 'row-main' },
+              el('div', { class: 'row-title' }, meal.name),
+              meal.location ? el('div', { class: 'row-meta' }, meal.location) : null),
+            el('div', { class: 'row-side' },
+              meal.slot ? el('span', { class: 'chip-static' }, meal.slot) : null)
+          )
+        );
+      }
 
       for (const act of day.activities) {
         const when = [act.time, act.location].filter(Boolean).join(' · ');
@@ -838,13 +960,13 @@ function render(data) {
       dayList.append(el('li', { class: classes.join(' ') }, body));
     }
 
-    // With no activities or expenses this is one line per stay — the same thing
-    // Route already says — so it stays folded away until there is more to it.
-    const worthOpening = trip.activities.length + (trip.expenses || []).length > 0;
-    const details = el('details', worthOpening ? { open: 'open' } : {},
+    // With nothing but stays this is one line per day saying what Route already
+    // says, so it stays folded away until there is more to it.
+    const extras = trip.activities.length + (trip.expenses || []).length + (trip.meals || []).length;
+    const details = el('details', extras > 0 ? { open: 'open' } : {},
       el('summary', {},
         `${days.length} days · ${trip.activities.length} planned, `
-        + `${(trip.expenses || []).length} expenses logged`),
+        + `${(trip.meals || []).length} meals, ${(trip.expenses || []).length} expenses`),
       el('div', { style: 'margin-top:16px' }, dayList)
     );
 
@@ -979,10 +1101,10 @@ function render(data) {
     packList.append(el('p', { class: 'empty' },
       trip.canEdit ? 'Nothing on the list yet.' : 'No packing list for this trip.'));
   } else {
-    for (const entry of packing) {
+    packing.forEach((entry, index) => {
       if (isEditing('packing', entry.id)) {
         packList.append(editRow('packing', entry));
-        continue;
+        return;
       }
 
       const box = el('input', { type: 'checkbox' });
@@ -1005,16 +1127,20 @@ function render(data) {
         }
       });
 
-      packList.append(
+      packList.append(makeDraggable(
         el('div', { class: entry.done ? 'row packed' : 'row' },
           el('div', { class: 'row-main' },
             el('label', { class: 'sharer' }, box, el('span', { class: 'row-title' }, entry.name)),
             entry.notes ? el('div', { class: 'row-meta' }, entry.notes) : null
           ),
-          el('div', { class: 'row-side' }, rowActions('packing', entry.id))
-        )
-      );
-    }
+          el('div', { class: 'row-side' },
+            reorderButtons('packing', entry.id, index, packing.length),
+            rowActions('packing', entry.id))
+        ),
+        'packing',
+        index
+      ));
+    });
   }
 
   const packChildren = [];
@@ -1028,6 +1154,65 @@ function render(data) {
     packChildren.push(el('div', { style: 'margin-top:16px' }, itemForm('packing')));
   }
   sections.push(card('Packing list', ...packChildren));
+
+  // --- Meals ---------------------------------------------------------------
+  // What you plan to eat, grouped by the day it happens on. Any number of
+  // sittings per day rather than a fixed three, and no cost: money spent on food
+  // belongs in Expenses, which is a different question from what's for dinner.
+  const meals = trip.meals || [];
+  const mealChildren = [];
+
+  if (!meals.length) {
+    mealChildren.push(el('p', { class: 'empty' },
+      trip.canEdit ? 'No meals planned yet.' : 'No meals planned for this trip.'));
+  } else {
+    // Undated meals sort last: they are ideas rather than plans for a given day.
+    const byDay = new Map();
+    meals.forEach((meal, index) => {
+      const key = meal.date || '';
+      if (!byDay.has(key)) byDay.set(key, []);
+      byDay.get(key).push({ meal, index });
+    });
+
+    const keys = [...byDay.keys()].sort((a, b) => (a || '9999').localeCompare(b || '9999'));
+
+    for (const key of keys) {
+      const group = el('div', { style: 'margin-bottom:18px' });
+      group.append(el('label', {}, key ? formatDay(key, { weekday: true, year: true }) : 'Any day'));
+
+      for (const { meal, index } of byDay.get(key)) {
+        if (isEditing('meals', meal.id)) {
+          group.append(editRow('meals', meal));
+          continue;
+        }
+
+        const meta = [meal.time, meal.location].filter(Boolean).join(' · ');
+
+        group.append(makeDraggable(
+          el('div', { class: 'row' },
+            el('div', { class: 'row-main' },
+              el('div', { class: 'row-title' }, meal.name),
+              meta ? el('div', { class: 'row-meta' }, meta) : null,
+              meal.notes ? el('div', { class: 'row-meta' }, meal.notes) : null
+            ),
+            el('div', { class: 'row-side' },
+              meal.slot ? el('span', { class: 'chip-static' }, meal.slot) : null,
+              reorderButtons('meals', meal.id, index, meals.length),
+              rowActions('meals', meal.id))
+          ),
+          'meals',
+          index
+        ));
+      }
+
+      mealChildren.push(group);
+    }
+  }
+
+  if (trip.canEdit) {
+    mealChildren.push(el('div', { style: 'margin-top:16px' }, itemForm('meals')));
+  }
+  sections.push(card('Meals', ...mealChildren));
 
   // --- Payments ------------------------------------------------------------
   // Repayments between travellers. These settle what the Costs card works out;
@@ -1161,7 +1346,7 @@ function render(data) {
   // here. On a trip that moves around, the route is what you open the page for;
   // money is the follow-up, and the share links matter least once they are sent.
   const ORDER = ['Trip details', 'Notes', 'Route', 'Day by day', 'Costs', 'Payments',
-    'Things to do', 'Expenses', 'Packing list', 'Places to go', 'Travellers',
+    'Things to do', 'Meals', 'Expenses', 'Packing list', 'Places to go', 'Travellers',
     'Share this trip', 'Access'];
 
   const rank = (node) => {

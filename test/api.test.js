@@ -718,3 +718,161 @@ test('the day plan reaches a read-only link without the edit token', async () =>
   assert.equal(days[0].arriving[0].name, 'Cairns');
   assert.equal(days.find((d) => d.date === '2026-09-28').stay, null, 'checkout day is not a night');
 });
+
+// --- reordering and meals ---------------------------------------------------
+
+async function addPacking(token, ...names) {
+  let last;
+  for (const name of names) last = await call('POST', `/api/trips/${token}/packing`, { name });
+  return last.body.packing;
+}
+
+test('an item can be moved and the new order sticks', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+  const items = await addPacking(t, 'Rice', 'Khursani', 'Pressure Cooker', 'Eggs');
+  assert.deepEqual(items.map((i) => i.name), ['Rice', 'Khursani', 'Pressure Cooker', 'Eggs']);
+
+  // Last to first.
+  const moved = await call('PATCH', `/api/trips/${t}/packing/${items[3].id}/move`, { toIndex: 0 });
+  assert.equal(moved.status, 200);
+  assert.deepEqual(moved.body.packing.map((i) => i.name),
+    ['Eggs', 'Rice', 'Khursani', 'Pressure Cooker']);
+
+  // And it survives a fresh read rather than only looking right in the response.
+  const reread = await call('GET', `/api/trips/${t}`);
+  assert.deepEqual(reread.body.packing.map((i) => i.name),
+    ['Eggs', 'Rice', 'Khursani', 'Pressure Cooker']);
+});
+
+test('moving into the middle keeps every item exactly once', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+  const items = await addPacking(t, 'A', 'B', 'C', 'D', 'E');
+
+  const moved = await call('PATCH', `/api/trips/${t}/packing/${items[0].id}/move`, { toIndex: 2 });
+  assert.deepEqual(moved.body.packing.map((i) => i.name), ['B', 'C', 'A', 'D', 'E']);
+  assert.equal(new Set(moved.body.packing.map((i) => i.id)).size, 5, 'nothing duplicated or lost');
+});
+
+test('an index past the end just means last', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+  const items = await addPacking(t, 'A', 'B', 'C');
+
+  const moved = await call('PATCH', `/api/trips/${t}/packing/${items[0].id}/move`, { toIndex: 99 });
+  assert.deepEqual(moved.body.packing.map((i) => i.name), ['B', 'C', 'A']);
+
+  const back = await call('PATCH', `/api/trips/${t}/packing/${items[0].id}/move`, { toIndex: -5 });
+  assert.deepEqual(back.body.packing.map((i) => i.name), ['A', 'B', 'C']);
+});
+
+test('reordering one list leaves the others alone', async () => {
+  // Every kind shares the trip_items table, so a careless renumber would
+  // scramble the stays while sorting the packing list.
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  await call('POST', `/api/trips/${t}/stays`, { name: 'First stop', cost: '100' });
+  await call('POST', `/api/trips/${t}/stays`, { name: 'Second stop', cost: '200' });
+  const items = await addPacking(t, 'Rice', 'Eggs');
+
+  const moved = await call('PATCH', `/api/trips/${t}/packing/${items[1].id}/move`, { toIndex: 0 });
+  assert.deepEqual(moved.body.packing.map((i) => i.name), ['Eggs', 'Rice']);
+  assert.deepEqual(moved.body.stays.map((i) => i.name), ['First stop', 'Second stop']);
+});
+
+test('a move is rejected without an edit link, a real item, or an index', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+  const items = await addPacking(t, 'Rice', 'Eggs');
+
+  const readOnly = await call('PATCH', `/api/trips/${trip.viewToken}/packing/${items[0].id}/move`,
+    { toIndex: 1 });
+  assert.equal(readOnly.status, 403);
+
+  const missing = await call('PATCH', `/api/trips/${t}/packing/nope/move`, { toIndex: 0 });
+  assert.equal(missing.status, 404);
+
+  const noIndex = await call('PATCH', `/api/trips/${t}/packing/${items[0].id}/move`, {});
+  assert.equal(noIndex.status, 400);
+
+  const notANumber = await call('PATCH', `/api/trips/${t}/packing/${items[0].id}/move`,
+    { toIndex: 'first' });
+  assert.equal(notANumber.status, 400);
+});
+
+test("an item cannot be moved through another trip's link", async () => {
+  const tripA = await makeTrip('Trip A');
+  const tripB = await makeTrip('Trip B');
+  const items = await addPacking(tripA.editToken, 'Rice', 'Eggs');
+
+  const cross = await call('PATCH', `/api/trips/${tripB.editToken}/packing/${items[0].id}/move`,
+    { toIndex: 1 });
+  assert.equal(cross.status, 404);
+
+  const untouched = await call('GET', `/api/trips/${tripA.editToken}`);
+  assert.deepEqual(untouched.body.packing.map((i) => i.name), ['Rice', 'Eggs']);
+});
+
+test('meals are planned per day and cost nothing', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  await call('POST', `/api/trips/${t}/travellers`, { name: 'Prabin' });
+  const added = await call('POST', `/api/trips/${t}/meals`, {
+    name: 'Dal bhat',
+    date: '2026-09-29',
+    slot: 'Dinner',
+    location: 'Cairns Airbnb',
+  });
+
+  assert.equal(added.status, 201);
+  const meal = added.body.meals[0];
+  assert.equal(meal.name, 'Dal bhat');
+  assert.equal(meal.slot, 'Dinner');
+  assert.equal(meal.date, '2026-09-29');
+  assert.equal(meal.location, 'Cairns Airbnb');
+
+  // A plan of what to eat is not money spent on food.
+  assert.equal(added.body.summary.totalCents, 0);
+  assert.equal(added.body.summary.balances[0].netCents, 0);
+  assert.deepEqual(added.body.summary.byCategory, {});
+});
+
+test('a meal shows up on its day in the day plan', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  await call('PATCH', `/api/trips/${t}`, { startDate: '2026-09-25', endDate: '2026-09-27' });
+  await call('POST', `/api/trips/${t}/meals`, { name: 'Porridge', date: '2026-09-26', slot: 'Breakfast' });
+  const res = await call('POST', `/api/trips/${t}/meals`, { name: 'Noodles', date: '2026-09-26', slot: 'Lunch' });
+
+  const day = res.body.summary.days.find((d) => d.date === '2026-09-26');
+  assert.deepEqual(day.meals.map((m) => m.name), ['Porridge', 'Noodles']);
+  assert.equal(day.costCents, 0, 'meals carry no cost');
+
+  const quiet = res.body.summary.days.find((d) => d.date === '2026-09-25');
+  assert.deepEqual(quiet.meals, []);
+});
+
+test('a meal can be dated later and still widens the day plan', async () => {
+  // A meal on a day outside the stays should still get a row rather than vanish.
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  await call('POST', `/api/trips/${t}/stays`, {
+    name: 'Cairns', checkIn: '2026-09-25', checkOut: '2026-09-26', cost: '100',
+  });
+  const res = await call('POST', `/api/trips/${t}/meals`, { name: 'Farewell dinner', date: '2026-09-28' });
+
+  const days = res.body.summary.days;
+  assert.equal(days.at(-1).date, '2026-09-28');
+  assert.equal(days.at(-1).meals[0].name, 'Farewell dinner');
+});
+
+test('a read-only link cannot add a meal', async () => {
+  const trip = await makeTrip();
+  const res = await call('POST', `/api/trips/${trip.viewToken}/meals`, { name: 'Sneaky supper' });
+  assert.equal(res.status, 403);
+});

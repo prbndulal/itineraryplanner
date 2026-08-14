@@ -65,7 +65,7 @@ export async function load() {
       trip_id     TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
       -- Keep this list in step with the CHECK in the migration block below: this
       -- one only runs for a brand new database, that one fixes an existing one.
-      kind        TEXT NOT NULL CHECK (kind IN ('stays', 'activities', 'travellers', 'expenses', 'payments', 'packing')),
+      kind        TEXT NOT NULL CHECK (kind IN ('stays', 'activities', 'travellers', 'expenses', 'payments', 'packing', 'meals')),
       position    BIGSERIAL,
       name        TEXT NOT NULL DEFAULT '',
       address     TEXT NOT NULL DEFAULT '',
@@ -98,7 +98,7 @@ export async function load() {
     ALTER TABLE trip_items ADD COLUMN IF NOT EXISTS category  TEXT NOT NULL DEFAULT '';
     ALTER TABLE trip_items DROP CONSTRAINT IF EXISTS trip_items_kind_check;
     ALTER TABLE trip_items ADD CONSTRAINT trip_items_kind_check
-      CHECK (kind IN ('stays', 'activities', 'travellers', 'expenses', 'payments', 'packing'));
+      CHECK (kind IN ('stays', 'activities', 'travellers', 'expenses', 'payments', 'packing', 'meals'));
   `);
 }
 
@@ -162,6 +162,16 @@ function rowToItem(row) {
       done: row.category === '1',
       assignedTo: row.paid_by,
     });
+  } else if (row.kind === 'meals') {
+    // What you plan to eat and when. `category` holds the sitting — breakfast,
+    // lunch, dinner or anything else typed in — and there is no cost: money
+    // spent on food is an expense, which is a different thing from a plan.
+    Object.assign(item, {
+      date: row.item_date,
+      slot: row.category,
+      time: row.item_time,
+      location: row.location,
+    });
   } else {
     item.email = row.email;
   }
@@ -185,13 +195,14 @@ const COLUMNS = {
   paidBy: 'paid_by',
   sharedBy: 'shared_by',
   category: 'category',
-  // Two pairs of API fields deliberately share a column: paidTo/sharedBy both
-  // write shared_by, and done/category both write category. That is only safe
-  // because COLLECTION_FIELDS in server.js never offers both names to the same
-  // kind. Adding `category` to packing, or `sharedBy` to payments, would
-  // silently overwrite the other field.
+  // Several API fields deliberately share a column: paidTo/sharedBy both write
+  // shared_by, and done/slot/category all write category. That is only safe
+  // because COLLECTION_FIELDS in server.js never offers two of them to the same
+  // kind. Adding `category` to packing or meals, or `sharedBy` to payments,
+  // would silently overwrite the other field.
   paidTo: 'shared_by',
   done: 'category',
+  slot: 'category',
   email: 'email',
   mapUrl: 'map_url',
   notes: 'notes',
@@ -215,6 +226,7 @@ function rowToTrip(row, items) {
     expenses: items.filter((i) => i.kind === 'expenses').map(rowToItem),
     payments: items.filter((i) => i.kind === 'payments').map(rowToItem),
     packing: items.filter((i) => i.kind === 'packing').map(rowToItem),
+    meals: items.filter((i) => i.kind === 'meals').map(rowToItem),
   };
 }
 
@@ -294,6 +306,7 @@ const COLLECTIONS = new Set([
   'expenses',
   'payments',
   'packing',
+  'meals',
 ]);
 
 export async function addItem(tripId, collection, item) {
@@ -348,6 +361,57 @@ export async function removeItem(tripId, collection, itemId) {
   );
   if (rowCount > 0 && collection === 'travellers') await forgetTraveller(tripId, itemId);
   return rowCount > 0;
+}
+
+// Puts `itemId` at `toIndex` within its own collection and renumbers the rest.
+//
+// `position` starts life as a BIGSERIAL, so values are unique but arbitrary and
+// shared across every kind in the table. Rewriting the whole collection's
+// positions as 0..n-1 is the simplest thing that stays correct: the lists are
+// short, and it means the numbers can never drift or collide after repeated
+// moves. It runs in a transaction so a failure halfway cannot leave the list
+// half-renumbered.
+export async function moveItem(tripId, collection, itemId, toIndex) {
+  if (!COLLECTIONS.has(collection)) return false;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Locked so a concurrent move can't read the same order and write a
+    // conflicting one.
+    const { rows } = await client.query(
+      `SELECT id FROM trip_items
+       WHERE trip_id = $1 AND kind = $2
+       ORDER BY position
+       FOR UPDATE`,
+      [tripId, collection]
+    );
+
+    const order = rows.map((r) => r.id);
+    const from = order.indexOf(itemId);
+    if (from === -1) {
+      await client.query('ROLLBACK');
+      return false;
+    }
+
+    // Clamp rather than reject: an index past the end plainly means "put it
+    // last", and that is what a drag to the bottom of the list sends.
+    const to = Math.max(0, Math.min(order.length - 1, Math.trunc(toIndex)));
+    order.splice(to, 0, ...order.splice(from, 1));
+
+    for (const [index, id2] of order.entries()) {
+      await client.query('UPDATE trip_items SET position = $1 WHERE id = $2', [index, id2]);
+    }
+
+    await client.query('COMMIT');
+    return true;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // A removed traveller must not stay referenced as a payer or as one of the

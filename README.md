@@ -5,7 +5,7 @@ Plan a trip, track what it costs, and share it with everyone coming along.
 - **Route** — stays drawn as a journey: each stop in date order, nights, per-night
   rate, and a marker on any stretch of the trip with nowhere booked
 - **Things to do** — tours, bookings and activities with date, time, location, cost
-- **Expenses** — everything else: meals, taxis, tickets, by category and date
+- **Expenses** — everything else you spend on: food, fuel, taxis, tickets, by category and date
 - **Travellers** — who is coming, who paid for what
 - **Costs** — running total, category breakdown, and who owes whom
 - **Day by day** — the trip read along the calendar: where you sleep each night,
@@ -13,6 +13,8 @@ Plan a trip, track what it costs, and share it with everyone coming along.
 - **Settling up** — turns the balances into "X pays Y" so the group can square up
 - **Payments** — record a repayment and watch the debt shrink; never counted as a trip cost
 - **Packing list** — a shared checklist everyone can see and the trip owner can tick
+- **Meals** — what you plan to eat on each day, grouped by date
+- **Reordering** — drag a row on a desktop, or use the ↑↓ buttons anywhere
 - **Reports** — a printable per-person statement of what they owe or are owed
 - **Splitting** — each cost can be shared by the whole group or just the people it was for
 - **Places to go** — attraction suggestions near the destination, from OpenStreetMap
@@ -159,6 +161,24 @@ for costs and split lists, which keeps the generic read and write paths generic.
 other credential, and letting it write — even one field — would be the first
 hole in the single gate that protects everything else. View links see the list
 and the progress count with the checkboxes disabled.
+
+**Reordering rewrites the whole list's positions.** `position` starts as a
+BIGSERIAL, so the values are unique but arbitrary and shared across every kind
+in the table. A move renumbers that one collection as 0..n-1 inside a
+transaction with the rows locked: the lists are short, and it means the numbers
+can never drift or collide however many times things are shuffled. Renumbering
+is scoped to the collection, so sorting the packing list cannot disturb the
+order of the stays sharing the table.
+
+**Dragging is the nicety; the buttons are the feature.** Native HTML5 drag and
+drop does not work on touch screens without a library, and this app is used from
+a phone. Everything a drag can do is also reachable through the ↑↓ buttons, so
+nothing is lost where dragging is unavailable — including for keyboard users.
+
+**Meals carry no cost.** What you plan to eat and what you spent on food are
+different questions: the plan lives in Meals, the money lives in Expenses. Any
+number of sittings can go on a day rather than a fixed breakfast/lunch/dinner,
+because morning tea and supper are meals too.
 
 **Item writes are scoped by trip.** Update and delete queries match on
 `trip_id` as well as item id, so a token for one trip cannot touch another

@@ -98,6 +98,9 @@ const COLLECTION_FIELDS = {
   // `done` is missing on purpose: cleanText would turn a boolean into a string
   // and store "false" as a truthy value. It is handled explicitly below.
   packing: ['name', 'assignedTo', 'notes'],
+  // Meals carry no cost: what you spend on food is an expense, which is a
+  // separate thing from a plan of what you are going to eat.
+  meals: ['name', 'date', 'slot', 'time', 'location', 'notes'],
 };
 
 // Collections whose items carry a cost that can be split across a subset of the
@@ -294,6 +297,22 @@ app.post('/api/trips/:token/:collection', resolve, requireEdit, async (req, res,
     const created = await store.addItem(req.trip.id, collection, item);
     if (!created) return res.status(400).json({ error: 'Unknown section' });
     res.status(201).json(present(await reload(req), true));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Reordering. Registered before the :itemId route below, otherwise "move" would
+// be matched as an item id and the request would 404.
+app.patch('/api/trips/:token/:collection/:itemId/move', resolve, requireEdit, async (req, res, next) => {
+  try {
+    const { collection, itemId } = req.params;
+    const toIndex = Number(req.body?.toIndex);
+    if (!Number.isFinite(toIndex)) return res.status(400).json({ error: 'Where should it go?' });
+
+    const moved = await store.moveItem(req.trip.id, collection, itemId, toIndex);
+    if (!moved) return res.status(404).json({ error: 'Item not found' });
+    res.json(present(await reload(req), true));
   } catch (err) {
     next(err);
   }

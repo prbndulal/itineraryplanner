@@ -310,6 +310,7 @@ export function dayPlan(trip) {
   const stays = trip.stays || [];
   const activities = trip.activities || [];
   const expenses = trip.expenses || [];
+  const meals = trip.meals || [];
 
   const dates = [
     trip.startDate,
@@ -317,6 +318,7 @@ export function dayPlan(trip) {
     ...stays.flatMap((s) => [s.checkIn, s.checkOut]),
     ...activities.map((a) => a.date),
     ...expenses.map((e) => e.date),
+    ...meals.map((m) => m.date),
   ].filter(isIsoDate);
 
   if (!dates.length) return [];
@@ -344,6 +346,10 @@ export function dayPlan(trip) {
       .sort((a, b) => (a.time || '99:99').localeCompare(b.time || '99:99'));
     const spentThisDay = expenses.filter((e) => e.date === date);
 
+    // Ordered the way the meals list is, so breakfast stays above dinner if that
+    // is how they were arranged there.
+    const eatingThisDay = meals.filter((m) => m.date === date);
+
     days.push({
       date,
       index: i + 1,
@@ -352,6 +358,7 @@ export function dayPlan(trip) {
       departing: stays.filter((s) => s.checkOut === date),
       activities: onThisDay,
       expenses: spentThisDay,
+      meals: eatingThisDay,
       // Only what happens on the day itself. A five-night booking is one cost on
       // its check-in date, not a fifth of a cost on each of five days.
       costCents: [...onThisDay, ...spentThisDay].reduce((sum, item) => sum + toCents(item.cost), 0),
