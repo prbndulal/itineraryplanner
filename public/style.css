@@ -436,3 +436,18 @@ body:not([data-person="all"]) .person-report.is-selected { display: block; }
 
   a { color: inherit; text-decoration: none; }
 }
+
+/* A day with a bed booked but nothing else happening: present, but not shouting. */
+.leg-quiet .leg-body { opacity: 0.62; }
+
+/* Collapsed sections. summary carries the affordance, so it needs to look like one. */
+details > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 14px;
+  padding: 2px 0;
+}
+details > summary:hover { color: var(--accent); }
+
+/* Something already packed: still listed, visibly done with. */
+.packed .row-title { text-decoration: line-through; color: var(--muted); }

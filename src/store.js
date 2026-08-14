@@ -63,7 +63,9 @@ export async function load() {
     CREATE TABLE IF NOT EXISTS trip_items (
       id          TEXT PRIMARY KEY,
       trip_id     TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
-      kind        TEXT NOT NULL CHECK (kind IN ('stays', 'activities', 'travellers', 'expenses')),
+      -- Keep this list in step with the CHECK in the migration block below: this
+      -- one only runs for a brand new database, that one fixes an existing one.
+      kind        TEXT NOT NULL CHECK (kind IN ('stays', 'activities', 'travellers', 'expenses', 'payments', 'packing')),
       position    BIGSERIAL,
       name        TEXT NOT NULL DEFAULT '',
       address     TEXT NOT NULL DEFAULT '',
@@ -96,7 +98,7 @@ export async function load() {
     ALTER TABLE trip_items ADD COLUMN IF NOT EXISTS category  TEXT NOT NULL DEFAULT '';
     ALTER TABLE trip_items DROP CONSTRAINT IF EXISTS trip_items_kind_check;
     ALTER TABLE trip_items ADD CONSTRAINT trip_items_kind_check
-      CHECK (kind IN ('stays', 'activities', 'travellers', 'expenses'));
+      CHECK (kind IN ('stays', 'activities', 'travellers', 'expenses', 'payments', 'packing'));
   `);
 }
 
@@ -141,6 +143,25 @@ function rowToItem(row) {
       paidBy: row.paid_by,
       sharedBy: parseSharedBy(row.shared_by),
     });
+  } else if (row.kind === 'payments') {
+    // A repayment between two people. `shared_by` holds a single traveller id
+    // here rather than a list, so it is read raw: reusing that column means
+    // forgetTraveller() already knows to clean it up.
+    Object.assign(item, {
+      date: row.item_date,
+      cost: row.cost,
+      paidBy: row.paid_by,
+      paidTo: row.shared_by,
+    });
+  } else if (row.kind === 'packing') {
+    // Done-state lives in `category` as '1' or ''. Every column in this table is
+    // TEXT and cleanText() stringifies everything, so a real boolean column
+    // would reject the empty string an unticked box sends. The conversion is
+    // confined to this line and the matching one in buildItem().
+    Object.assign(item, {
+      done: row.category === '1',
+      assignedTo: row.paid_by,
+    });
   } else {
     item.email = row.email;
   }
@@ -164,6 +185,13 @@ const COLUMNS = {
   paidBy: 'paid_by',
   sharedBy: 'shared_by',
   category: 'category',
+  // Two pairs of API fields deliberately share a column: paidTo/sharedBy both
+  // write shared_by, and done/category both write category. That is only safe
+  // because COLLECTION_FIELDS in server.js never offers both names to the same
+  // kind. Adding `category` to packing, or `sharedBy` to payments, would
+  // silently overwrite the other field.
+  paidTo: 'shared_by',
+  done: 'category',
   email: 'email',
   mapUrl: 'map_url',
   notes: 'notes',
@@ -185,6 +213,8 @@ function rowToTrip(row, items) {
     activities: items.filter((i) => i.kind === 'activities').map(rowToItem),
     travellers: items.filter((i) => i.kind === 'travellers').map(rowToItem),
     expenses: items.filter((i) => i.kind === 'expenses').map(rowToItem),
+    payments: items.filter((i) => i.kind === 'payments').map(rowToItem),
+    packing: items.filter((i) => i.kind === 'packing').map(rowToItem),
   };
 }
 
@@ -257,7 +287,14 @@ export async function deleteTrip(tripId) {
   return rowCount > 0;
 }
 
-const COLLECTIONS = new Set(['stays', 'activities', 'travellers', 'expenses']);
+const COLLECTIONS = new Set([
+  'stays',
+  'activities',
+  'travellers',
+  'expenses',
+  'payments',
+  'packing',
+]);
 
 export async function addItem(tripId, collection, item) {
   if (!COLLECTIONS.has(collection)) return null;
@@ -318,6 +355,15 @@ export async function removeItem(tripId, collection, itemId) {
 // leaving them in the rows means a re-added traveller would silently inherit
 // the old one's costs.
 async function forgetTraveller(tripId, travellerId) {
+  // A repayment involving someone no longer on the trip has no meaning, and the
+  // blanking below would otherwise leave it half-addressed. Drop those rows
+  // before the generic cleanup gets to them.
+  await pool.query(
+    `DELETE FROM trip_items
+     WHERE trip_id = $1 AND kind = 'payments' AND (paid_by = $2 OR shared_by = $2)`,
+    [tripId, travellerId]
+  );
+
   await pool.query(
     'UPDATE trip_items SET paid_by = $1 WHERE trip_id = $2 AND paid_by = $3',
     ['', tripId, travellerId]

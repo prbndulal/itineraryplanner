@@ -10,6 +10,7 @@ import {
   settle,
   personLedger,
   accommodationGaps,
+  dayPlan,
 } from '../src/costs.js';
 
 test('toCents parses money without float drift', () => {
@@ -472,4 +473,322 @@ test('overlapping stays do not invent a gap', () => {
 
 test('accommodationGaps needs trip dates to say anything', () => {
   assert.deepEqual(accommodationGaps({ startDate: '', endDate: '', stays: [] }), []);
+});
+
+// --- day by day -------------------------------------------------------------
+
+// The real trip's shape: contiguous stays where each check-out is the next
+// check-in, which is what makes the half-open interval matter.
+const roadTrip = () => ({
+  startDate: '2026-09-25',
+  endDate: '2026-10-09',
+  stays: [
+    { name: 'Ballina', checkIn: '2026-09-25', checkOut: '2026-09-26', cost: '344.70' },
+    { name: 'Bundaberg', checkIn: '2026-09-26', checkOut: '2026-09-27', cost: '285.91' },
+    { name: 'Cairns', checkIn: '2026-09-29', checkOut: '2026-10-04', cost: '1591.99' },
+  ],
+  activities: [],
+  expenses: [],
+});
+
+test('dayPlan covers every day of the trip', () => {
+  const days = dayPlan(roadTrip());
+  assert.equal(days.length, 15, '25 Sep to 9 Oct inclusive');
+  assert.equal(days[0].date, '2026-09-25');
+  assert.equal(days.at(-1).date, '2026-10-09');
+  assert.equal(days[0].index, 1);
+});
+
+test('a multi-night stay fills its nights but not its checkout day', () => {
+  const days = dayPlan(roadTrip());
+  const cairns = days.filter((d) => d.stay && d.stay.name === 'Cairns');
+  assert.equal(cairns.length, 5, '29 Sep through 3 Oct');
+  assert.deepEqual(cairns.map((d) => d.date), [
+    '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-03',
+  ]);
+
+  // You check out on the 4th, so you do not sleep there that night.
+  const checkoutDay = days.find((d) => d.date === '2026-10-04');
+  assert.equal(checkoutDay.stay, null);
+  assert.equal(checkoutDay.departing[0].name, 'Cairns');
+});
+
+test('a handover day shows the departure and the arrival', () => {
+  // Leave Ballina and sleep in Bundaberg, both on 26 Sep.
+  const day = dayPlan(roadTrip()).find((d) => d.date === '2026-09-26');
+  assert.equal(day.departing[0].name, 'Ballina');
+  assert.equal(day.arriving[0].name, 'Bundaberg');
+  assert.equal(day.stay.name, 'Bundaberg', 'the stay is where you end up');
+});
+
+test('days with nothing booked are still listed', () => {
+  const days = dayPlan(roadTrip());
+  const unbooked = days.filter((d) => !d.stay);
+  assert.ok(unbooked.length > 0);
+  assert.ok(unbooked.every((d) => d.costCents === 0));
+
+  // Every unbooked *night* shows up as an unbooked day. There is one extra: the
+  // final day of the trip, when you travel home rather than needing a bed.
+  const gaps = accommodationGaps(roadTrip());
+  const gapNights = gaps.reduce((sum, g) => sum + g.nights, 0);
+  assert.equal(unbooked.length, gapNights + 1);
+  assert.equal(unbooked.at(-1).date, '2026-10-09', 'the last day is a travel day, not a missing booking');
+
+  const nightDates = new Set(unbooked.slice(0, -1).map((d) => d.date));
+  for (const gap of gaps) {
+    for (let d = gap.from; d < gap.to; ) {
+      assert.ok(nightDates.has(d), `${d} should be an unbooked day`);
+      d = new Date(Date.parse(`${d}T00:00:00Z`) + 86400000).toISOString().slice(0, 10);
+    }
+  }
+});
+
+test('activities and expenses land on their own day, earliest first', () => {
+  const trip = roadTrip();
+  trip.activities = [
+    { name: 'Reef trip', date: '2026-09-30', time: '14:00', cost: '120.00' },
+    { name: 'Breakfast tour', date: '2026-09-30', time: '07:30', cost: '30.00' },
+    { name: 'Later trip', date: '2026-10-02', cost: '10.00' },
+  ];
+  trip.expenses = [{ name: 'Fuel', date: '2026-09-30', cost: '80.00' }];
+
+  const day = dayPlan(trip).find((d) => d.date === '2026-09-30');
+  assert.deepEqual(day.activities.map((a) => a.name), ['Breakfast tour', 'Reef trip']);
+  assert.equal(day.expenses[0].name, 'Fuel');
+  // 30 + 120 + 80, and nothing from the five-night stay it falls inside.
+  assert.equal(day.costCents, 23000);
+});
+
+test('a stay costs nothing extra on the days after check-in', () => {
+  // Otherwise day totals would stop adding up to the trip total.
+  const days = dayPlan(roadTrip());
+  assert.ok(days.every((d) => d.costCents === 0), 'no activities or expenses in this fixture');
+});
+
+test('dayPlan survives missing and malformed dates', () => {
+  const days = dayPlan({
+    startDate: '2026-09-25',
+    endDate: '2026-09-27',
+    stays: [
+      { name: 'No dates', checkIn: '', checkOut: '' },
+      { name: 'Nonsense', checkIn: 'not-a-date', checkOut: 'also-bad' },
+      { name: 'Fine', checkIn: '2026-09-25', checkOut: '2026-09-26' },
+    ],
+    activities: [{ name: 'Undated', date: undefined }],
+    expenses: [],
+  });
+
+  assert.equal(days.length, 3);
+  assert.ok(days.every((d) => /^\d{4}-\d{2}-\d{2}$/.test(d.date)), 'no Invalid Date leaks out');
+});
+
+test('dayPlan refuses an implausible span rather than walking it', () => {
+  // A mistyped year would otherwise build tens of thousands of entries.
+  assert.deepEqual(
+    dayPlan({
+      startDate: '2026-09-25',
+      endDate: '2026-10-09',
+      stays: [{ name: 'Typo', checkIn: '2026-09-25', checkOut: '2062-10-04' }],
+      activities: [],
+      expenses: [],
+    }),
+    []
+  );
+});
+
+test('dayPlan returns nothing when there are no dates at all', () => {
+  assert.deepEqual(
+    dayPlan({ startDate: '', endDate: '', stays: [], activities: [], expenses: [] }),
+    []
+  );
+});
+
+// --- recorded payments ------------------------------------------------------
+
+const twoPeople = (payments = []) => ({
+  currency: 'AUD',
+  travellers: [
+    { id: 'a', name: 'Prabin' },
+    { id: 'b', name: 'Sam' },
+  ],
+  stays: [{ id: 's1', name: 'Hotel', cost: '300.00', paidBy: 'a' }],
+  activities: [],
+  expenses: [],
+  payments,
+});
+
+test('a repayment is not a trip cost', () => {
+  const before = summarise(twoPeople());
+  const after = summarise(twoPeople([
+    { id: 'p1', name: 'Bank transfer', cost: '50.00', paidBy: 'b', paidTo: 'a' },
+  ]));
+
+  // The trip did not get more expensive because someone settled up.
+  assert.equal(after.totalCents, before.totalCents);
+  assert.equal(after.stayCents, before.stayCents);
+  assert.equal(after.activityCents, before.activityCents);
+  assert.equal(after.expenseCents, before.expenseCents);
+  assert.equal(after.perPersonCents, before.perPersonCents);
+  assert.deepEqual(after.byCategory, before.byCategory);
+
+  // And nobody's share of the costs changed either. This is the assertion that
+  // catches a payment being applied to the wrong side of the balance: put it in
+  // `owe` instead of `paid` and the totals still net to zero, so every other
+  // test would still pass while the numbers were quietly wrong.
+  for (const b of after.balances) {
+    const was = before.balances.find((x) => x.id === b.id);
+    assert.equal(b.oweCents, was.oweCents, `${b.name}'s share must not move`);
+  }
+});
+
+test('a repayment moves money between two people and nowhere else', () => {
+  const before = summarise(twoPeople());
+  const after = summarise(twoPeople([
+    { id: 'p1', name: 'Transfer', cost: '50.00', paidBy: 'b', paidTo: 'a' },
+  ]));
+
+  const sum = (s) => s.balances.reduce((total, b) => total + b.paidCents, 0);
+  assert.equal(sum(after), sum(before), 'the total paid across the group is unchanged');
+  assert.equal(after.balances.reduce((t, b) => t + b.netCents, 0), 0);
+
+  const sam = after.balances.find((b) => b.name === 'Sam');
+  assert.equal(sam.paidCents, 5000);
+  assert.equal(sam.paidCostCents, 0, 'a repayment is not money spent on the trip');
+});
+
+test('a repayment cannot change what is unattributed', () => {
+  // The real trip's state: costs recorded, nobody marked as paying. Recording a
+  // repayment must not make the app think it now knows who paid for the trip.
+  const noPayers = {
+    currency: 'AUD',
+    travellers: [
+      { id: 'a', name: 'Bharat' },
+      { id: 'b', name: 'Ashish' },
+      { id: 'c', name: 'Prabin' },
+    ],
+    stays: [{ id: 's1', name: 'Cairns', cost: '1591.99' }],
+    activities: [],
+    expenses: [],
+    payments: [],
+  };
+
+  const before = settle(summarise(noPayers).balances);
+  const after = settle(summarise({
+    ...noPayers,
+    payments: [{ id: 'p1', name: 'Transfer', cost: '500.00', paidBy: 'b', paidTo: 'a' }],
+  }).balances);
+
+  assert.equal(after.unpaidCents, before.unpaidCents);
+  assert.equal(after.unpaidCents, 159199);
+});
+
+test('a repayment cancels the transfer it settles', () => {
+  const settled = settle(summarise(twoPeople([
+    { id: 'p1', name: 'Transfer', cost: '150.00', paidBy: 'b', paidTo: 'a' },
+  ])).balances);
+
+  assert.deepEqual(settled.transfers, []);
+  assert.equal(settled.settled, true);
+});
+
+test('overpaying reverses the debt rather than clamping at zero', () => {
+  const settled = settle(summarise(twoPeople([
+    { id: 'p1', name: 'Too much', cost: '200.00', paidBy: 'b', paidTo: 'a' },
+  ])).balances);
+
+  assert.equal(settled.transfers.length, 1);
+  assert.equal(settled.transfers[0].fromName, 'Prabin', 'now Prabin owes Sam the difference');
+  assert.equal(settled.transfers[0].cents, 5000);
+});
+
+test('unusable payments are ignored', () => {
+  const before = summarise(twoPeople());
+  const after = summarise(twoPeople([
+    { id: 'p1', name: 'No recipient', cost: '50.00', paidBy: 'b', paidTo: '' },
+    { id: 'p2', name: 'No payer', cost: '50.00', paidBy: '', paidTo: 'a' },
+    { id: 'p3', name: 'Ghost', cost: '50.00', paidBy: 'b', paidTo: 'nobody' },
+    { id: 'p4', name: 'To themselves', cost: '50.00', paidBy: 'b', paidTo: 'b' },
+    { id: 'p5', name: 'Nothing', cost: '0', paidBy: 'b', paidTo: 'a' },
+  ]));
+
+  assert.deepEqual(
+    after.balances.map((b) => b.netCents),
+    before.balances.map((b) => b.netCents)
+  );
+  assert.equal(after.balances.reduce((t, b) => t + b.netCents, 0), 0);
+});
+
+test('settlement survives any mix of costs and repayments', () => {
+  // The randomised check from before, now with repayments thrown in. Whatever
+  // shape the balances take, the transfers must still move exactly what is owed.
+  let seed = 11;
+  const random = (max) => {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    return seed % max;
+  };
+
+  for (let round = 0; round < 200; round += 1) {
+    const people = 2 + random(4);
+    const travellers = Array.from({ length: people }, (_, i) => ({ id: `p${i}`, name: `P${i}` }));
+    const total = 1000 + random(500000);
+
+    const stays = [{
+      id: 's1',
+      name: 'Stay',
+      cost: (total / 100).toFixed(2),
+      paidBy: `p${random(people)}`,
+    }];
+
+    const payments = Array.from({ length: random(4) }, (_, i) => {
+      const from = random(people);
+      let to = random(people);
+      if (to === from) to = (to + 1) % people;
+      return {
+        id: `pay${i}`,
+        name: 'Transfer',
+        cost: (random(200000) / 100).toFixed(2),
+        paidBy: `p${from}`,
+        paidTo: `p${to}`,
+      };
+    });
+
+    const trip = { currency: 'AUD', travellers, stays, activities: [], expenses: [], payments };
+    const s = summarise(trip);
+    const { transfers, unpaidCents } = settle(s.balances);
+
+    assert.equal(s.totalCents, toCents(stays[0].cost), 'repayments never inflate the total');
+    assert.equal(unpaidCents, 0, 'the one cost has a payer, so nothing is unattributed');
+    assert.equal(s.balances.reduce((t, b) => t + b.netCents, 0), 0);
+
+    const credit = s.balances.reduce((t, b) => t + Math.max(0, b.netCents), 0);
+    assert.equal(transfers.reduce((t, x) => t + x.cents, 0), credit);
+    assert.ok(transfers.every((x) => x.cents > 0));
+    assert.ok(transfers.length <= people - 1);
+  }
+});
+
+test('a person ledger keeps repayments out of their share', () => {
+  const trip = twoPeople([
+    { id: 'p1', name: 'Transfer', cost: '50.00', paidBy: 'b', paidTo: 'a' },
+  ]);
+
+  const summary = summarise(trip);
+  for (const traveller of trip.travellers) {
+    const ledger = personLedger(trip, traveller.id);
+    const summed = ledger.items.reduce((total, i) => total + i.shareCents, 0);
+    const expected = summary.balances.find((b) => b.id === traveller.id).oweCents;
+    assert.equal(summed, expected, `${traveller.name}'s items must still equal their share`);
+  }
+
+  const sam = personLedger(trip, 'b');
+  assert.equal(sam.payments.length, 1);
+  assert.equal(sam.payments[0].direction, 'out');
+  assert.equal(sam.payments[0].otherName, 'Prabin');
+  assert.equal(sam.paidCostCents, 0);
+  assert.equal(sam.paidCents, 5000);
+
+  const prabin = personLedger(trip, 'a');
+  assert.equal(prabin.payments[0].direction, 'in');
+  assert.equal(prabin.paidCostCents, 30000, 'what he actually spent on the trip');
+  assert.equal(prabin.paidCents, 25000, 'less the 50 he has been repaid');
 });

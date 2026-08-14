@@ -12,7 +12,7 @@
 </div>
 
 <script type="module">
-import { api, money, el } from '/app.js';
+import { api, money, el, toCents } from '/app.js';
 import { card, hero, formatRange, formatDay, settlementLines, personTabs } from '/trip-ui.js';
 
 // This page is deliberately read-only and contains no share-link markup, so an
@@ -35,19 +35,13 @@ function splitCents(totalCents, people) {
   return shares;
 }
 
-function toCents(value) {
-  if (value === '' || value === null || value === undefined) return 0;
-  const n = Number(String(value).replace(/[^0-9.-]/g, ''));
-  return Number.isFinite(n) ? Math.round(n * 100) : 0;
-}
-
 function sharersOf(item) {
   const known = new Set(trip.travellers.map((t) => t.id));
   const named = (item.sharedBy || []).filter((id) => known.has(id));
   return named.length ? named : trip.travellers.map((t) => t.id);
 }
 
-const COLLECTION_LABELS = { stays: 'Stays', activities: 'Itinerary', expenses: 'Expenses' };
+const COLLECTION_LABELS = { stays: 'Stays', activities: 'Things to do', expenses: 'Expenses' };
 
 function ledgerFor(travellerId) {
   const groups = [];
@@ -180,16 +174,47 @@ function personReport(balance) {
 
   section.append(verdictFor(balance, s.settlement, cur));
 
-  // The arithmetic, so anyone can check the result by hand.
+  // The arithmetic, so anyone can check the result by hand. Repayments are shown
+  // on their own line: folded into "you paid" they would make that figure match
+  // no list of items on the page.
+  const paidCost = balance.paidCostCents ?? balance.paidCents;
+  const repaid = balance.paidCents - paidCost;
+  const myPayments = (trip.payments || []).filter(
+    (p) => p.paidBy === balance.id || p.paidTo === balance.id
+  );
+
   section.append(card('Your position',
     el('div', { class: 'sum-line' },
-      el('span', {}, 'You paid'), el('span', {}, money(balance.paidCents, cur))),
+      el('span', {}, 'You paid toward the trip'), el('span', {}, money(paidCost, cur))),
+    repaid !== 0
+      ? el('div', { class: 'sum-line' },
+          el('span', {}, repaid > 0 ? 'Repayments you made' : 'Repayments you received'),
+          el('span', {}, `${repaid > 0 ? '+' : '−'} ${money(Math.abs(repaid), cur)}`))
+      : null,
     el('div', { class: 'sum-line' },
       el('span', {}, 'Your share of the costs'), el('span', {}, `− ${money(balance.oweCents, cur)}`)),
     el('div', { class: 'sum-line sum-total' },
       el('span', {}, balance.netCents >= 0 ? 'You are owed' : 'You owe'),
       el('span', {}, money(Math.abs(balance.netCents), cur)))
   ));
+
+  if (myPayments.length) {
+    const list = el('div');
+    for (const payment of myPayments) {
+      const outgoing = payment.paidBy === balance.id;
+      const otherId = outgoing ? payment.paidTo : payment.paidBy;
+      const other = trip.travellers.find((t) => t.id === otherId);
+      list.append(
+        el('div', { class: 'sum-line' },
+          el('span', {},
+            `${outgoing ? 'You paid' : 'Paid to you by'} ${other ? other.name : 'someone'}`
+            + (payment.date ? ` · ${formatDay(payment.date)}` : '')),
+          el('span', {}, money(toCents(payment.cost), cur))
+        )
+      );
+    }
+    section.append(card('Repayments', list));
+  }
 
   if (groups.length) {
     const tables = groups.map((g) => ledgerTable(g, cur));

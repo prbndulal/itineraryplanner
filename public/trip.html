@@ -13,8 +13,8 @@
 </div>
 
 <script type="module">
-import { api, money, el } from '/app.js';
-import { hero, formatRange, nightsLabel, settlementLines } from '/trip-ui.js';
+import { api, money, el, toCents } from '/app.js';
+import { hero, formatDay, formatRange, nightsLabel, settlementLines } from '/trip-ui.js';
 
 // /t/<token>, so take the segment after "t" rather than the last one — the
 // report page lives at /t/<token>/report and would otherwise parse as "report".
@@ -71,7 +71,7 @@ function payerChips(collection, item) {
 // one person fronted the whole trip.
 function bulkPayerRow() {
   const unassigned = [...trip.stays, ...trip.activities, ...(trip.expenses || [])]
-    .filter((item) => !item.paidBy && Number(item.cost || 0) > 0);
+    .filter((item) => !item.paidBy && toCents(item.cost) > 0);
 
   if (!trip.canEdit || !trip.travellers.length || !unassigned.length) return null;
 
@@ -145,6 +145,16 @@ function fieldsFor(collection, cur) {
       { key: 'mapUrl', label: 'Map link', placeholder: 'https://maps.google.com/…' },
     ];
   }
+  if (collection === 'packing') {
+    return [{ key: 'name', label: 'Item', placeholder: 'Sunscreen' }];
+  }
+  if (collection === 'payments') {
+    return [
+      { key: 'name', label: 'What was it', placeholder: 'Bank transfer' },
+      { key: 'date', label: 'Date', type: 'date' },
+      { key: 'cost', label: `Amount (${cur})`, type: 'number', step: '0.01', placeholder: '500.00' },
+    ];
+  }
   return [
     { key: 'name', label: 'Name', placeholder: 'Prabin' },
     { key: 'email', label: 'Email (optional)', type: 'email', placeholder: 'name@example.com' },
@@ -186,9 +196,54 @@ function itemForm(collection, { item = null, onCancel = null } = {}) {
     grid.append(cell);
   }
 
+  // A repayment needs both ends. Recording it backwards would make the debt
+  // worse rather than settling it, so the two selects sit together with a
+  // sentence underneath spelling out what is about to be saved.
+  let from = null;
+  let to = null;
+  if (collection === 'payments' && trip.travellers.length) {
+    const options = (selected) => {
+      const select = el('select', {});
+      select.append(el('option', { value: '' }, 'Choose…'));
+      for (const traveller of trip.travellers) {
+        select.append(el('option', { value: traveller.id }, traveller.name));
+      }
+      select.value = selected || '';
+      return select;
+    };
+
+    from = options(item && item.paidBy);
+    to = options(item && item.paidTo);
+
+    const preview = el('div', { class: 'row-meta' });
+    const describe = () => {
+      const payerName = from.selectedOptions[0]?.value ? from.selectedOptions[0].textContent : null;
+      const payeeName = to.selectedOptions[0]?.value ? to.selectedOptions[0].textContent : null;
+      const amount = toCents(inputs.cost ? inputs.cost.value : '');
+      preview.textContent = payerName && payeeName && amount > 0
+        ? `${payerName} pays ${payeeName} ${money(amount, trip.currency)}.`
+        : 'Pick who paid, who they paid, and how much.';
+    };
+
+    from.addEventListener('change', describe);
+    to.addEventListener('change', describe);
+    if (inputs.cost) inputs.cost.addEventListener('input', describe);
+    describe();
+
+    grid.append(
+      el('div', { class: 'field field-wide' },
+        el('label', {}, 'Who paid whom'),
+        el('div', { class: 'chip-row' },
+          from, el('span', { class: 'chip-label' }, 'paid'), to),
+        preview
+      )
+    );
+  }
+
   // "Paid by" is a select over current travellers, so costs attach to a person.
+  // Payments carry their own pair above, so they skip this.
   let payer = null;
-  if (fields.some((f) => f.key === 'cost') && trip.travellers.length) {
+  if (collection !== 'payments' && fields.some((f) => f.key === 'cost') && trip.travellers.length) {
     payer = el('select', {});
     payer.append(el('option', { value: '' }, 'Paid by — unassigned'));
     for (const traveller of trip.travellers) {
@@ -242,6 +297,8 @@ function itemForm(collection, { item = null, onCancel = null } = {}) {
     for (const [key, input] of Object.entries(inputs)) body[key] = input.value;
     // Always sent, so an existing payer can be reassigned or cleared.
     if (payer) body.paidBy = payer.value;
+    if (from) body.paidBy = from.value;
+    if (to) body.paidTo = to.value;
 
     if (sharers) {
       const picked = sharers.filter((s) => s.box.checked).map((s) => s.id);
@@ -625,7 +682,7 @@ function render(data) {
   // Per-night rates make an expensive-looking total comparable across stops.
   const rates = stays
     .filter((s) => s.nights > 0)
-    .map((s) => Math.round(Number(s.cost || 0) * 100 / s.nights));
+    .map((s) => Math.round(toCents(s.cost) / s.nights));
   const bestRate = rates.length > 1 ? Math.min(...rates) : null;
 
   const gapsByStart = new Map((s.gaps || []).map((g) => [g.from, g]));
@@ -639,7 +696,7 @@ function render(data) {
         return;
       }
 
-      const cents = Math.round(Number(stay.cost || 0) * 100);
+      const cents = toCents(stay.cost);
       const rate = stay.nights > 0 ? Math.round(cents / stay.nights) : null;
       const next = stays[index + 1];
       // A dashed connector marks a break in the dates; solid means the next stop
@@ -724,10 +781,84 @@ function render(data) {
   }
   sections.push(card('Route', ...routeChildren));
 
+  // --- Day by day ----------------------------------------------------------
+  // The same trip read along the calendar instead of along the route. Read-only
+  // on purpose: editing lives in Route, Things to do and Expenses, so there is
+  // only ever one place where an item can be changed.
+  const days = s.days || [];
+  if (days.length) {
+    const dayList = el('ol', { class: 'journey' });
+
+    for (const day of days) {
+      const heading = `Day ${day.index} · ${formatDay(day.date, { weekday: true })}`;
+      const arriving = day.arriving.map((x) => x.name).join(', ');
+      const departing = day.departing.map((x) => x.name).join(', ');
+
+      const moves = [];
+      if (departing) moves.push(`Leaving ${departing}`);
+      if (arriving && day.stay) moves.push(`Arriving ${arriving}`);
+
+      const nothingHappening = !day.stay && !day.activities.length && !day.expenses.length;
+      const classes = ['leg'];
+      if (!day.stay) classes.push('leg-gap');
+      else if (!day.activities.length && !day.expenses.length) classes.push('leg-quiet');
+
+      const body = el('div', { class: 'leg-body' },
+        el('div', { class: 'leg-when' }, heading),
+        el('div', { class: 'leg-title' },
+          day.stay ? day.stay.name : nothingHappening ? 'Nowhere booked' : 'No bed booked'),
+        moves.length ? el('div', { class: 'leg-meta' }, moves.join(' · ')) : null
+      );
+
+      for (const act of day.activities) {
+        const when = [act.time, act.location].filter(Boolean).join(' · ');
+        body.append(
+          el('div', { class: 'row' },
+            el('div', { class: 'row-main' },
+              el('div', { class: 'row-title' }, act.name),
+              when ? el('div', { class: 'row-meta' }, when) : null),
+            el('div', { class: 'row-side' },
+              el('div', { class: 'amount' }, money(toCents(act.cost), cur)))
+          )
+        );
+      }
+
+      for (const exp of day.expenses) {
+        body.append(
+          el('div', { class: 'row' },
+            el('div', { class: 'row-main' },
+              el('div', { class: 'row-title' }, exp.name),
+              exp.category ? el('div', { class: 'row-meta' }, exp.category) : null),
+            el('div', { class: 'row-side' },
+              el('div', { class: 'amount' }, money(toCents(exp.cost), cur)))
+          )
+        );
+      }
+
+      dayList.append(el('li', { class: classes.join(' ') }, body));
+    }
+
+    // With no activities or expenses this is one line per stay — the same thing
+    // Route already says — so it stays folded away until there is more to it.
+    const worthOpening = trip.activities.length + (trip.expenses || []).length > 0;
+    const details = el('details', worthOpening ? { open: 'open' } : {},
+      el('summary', {},
+        `${days.length} days · ${trip.activities.length} planned, `
+        + `${(trip.expenses || []).length} expenses logged`),
+      el('div', { style: 'margin-top:16px' }, dayList)
+    );
+
+    sections.push(card('Day by day', details));
+  }
+
   // --- Activities ----------------------------------------------------------
   const actList = el('div');
   if (!trip.activities.length) {
-    actList.append(el('p', { class: 'empty' }, 'Nothing planned yet.'));
+    // "Nothing planned yet" reads as wrong next to a fully booked route, so say
+    // what this section is actually for.
+    actList.append(el('p', { class: 'empty' }, trip.canEdit
+      ? 'No tours, bookings or things to do added yet — your stays are under Route.'
+      : 'No tours or bookings added for this trip.'));
   } else {
     const sorted = [...trip.activities].sort((a, b) =>
       `${a.date || '9999'}${a.time || ''}`.localeCompare(`${b.date || '9999'}${b.time || ''}`)
@@ -748,10 +879,11 @@ function render(data) {
             payerName(act.paidBy) ? el('div', { class: 'row-meta' }, `Paid by ${payerName(act.paidBy)}`) : null,
             sharedLabel(act) ? el('div', { class: 'row-meta shared' }, sharedLabel(act)) : null,
             act.notes ? el('div', { class: 'row-meta' }, act.notes) : null,
-            mapLink(act.mapUrl)
+            mapLink(act.mapUrl),
+            payerChips('activities', act)
           ),
           el('div', { class: 'row-side' },
-            el('div', { class: 'amount' }, money(Math.round(Number(act.cost || 0) * 100), cur)),
+            el('div', { class: 'amount' }, money(toCents(act.cost), cur)),
             rowActions('activities', act.id)
           )
         )
@@ -763,7 +895,9 @@ function render(data) {
   if (trip.canEdit) {
     actChildren.push(el('div', { style: 'margin-top:16px' }, itemForm('activities')));
   }
-  sections.push(card('Itinerary', ...actChildren));
+  // Not "Itinerary": the route above is the itinerary, and using that word for
+  // an empty activities list makes a fully planned trip look unplanned.
+  sections.push(card('Things to do', ...actChildren));
 
   // --- Suggestions ---------------------------------------------------------
   sections.push(suggestionsCard());
@@ -794,7 +928,7 @@ function render(data) {
             exp.notes ? el('div', { class: 'row-meta' }, exp.notes) : null
           ),
           el('div', { class: 'row-side' },
-            el('div', { class: 'amount' }, money(Math.round(Number(exp.cost || 0) * 100), cur)),
+            el('div', { class: 'amount' }, money(toCents(exp.cost), cur)),
             rowActions('expenses', exp.id)
           )
         )
@@ -837,6 +971,154 @@ function render(data) {
   }
   sections.push(card('Travellers', ...travChildren));
 
+  // --- Packing list --------------------------------------------------------
+  const packing = trip.packing || [];
+  const packList = el('div');
+
+  if (!packing.length) {
+    packList.append(el('p', { class: 'empty' },
+      trip.canEdit ? 'Nothing on the list yet.' : 'No packing list for this trip.'));
+  } else {
+    for (const entry of packing) {
+      if (isEditing('packing', entry.id)) {
+        packList.append(editRow('packing', entry));
+        continue;
+      }
+
+      const box = el('input', { type: 'checkbox' });
+      box.checked = entry.done;
+      // Ticking is a write, so a read-only link can see the list and the
+      // progress but cannot change it.
+      if (!trip.canEdit) box.disabled = true;
+
+      box.addEventListener('change', async () => {
+        box.disabled = true;
+        try {
+          render(await api(`/api/trips/${token}/packing/${entry.id}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ done: box.checked }),
+          }));
+        } catch (err) {
+          alert(err.message);
+          box.checked = entry.done;
+          box.disabled = false;
+        }
+      });
+
+      packList.append(
+        el('div', { class: entry.done ? 'row packed' : 'row' },
+          el('div', { class: 'row-main' },
+            el('label', { class: 'sharer' }, box, el('span', { class: 'row-title' }, entry.name)),
+            entry.notes ? el('div', { class: 'row-meta' }, entry.notes) : null
+          ),
+          el('div', { class: 'row-side' }, rowActions('packing', entry.id))
+        )
+      );
+    }
+  }
+
+  const packChildren = [];
+  if (packing.length) {
+    const done = packing.filter((p) => p.done).length;
+    packChildren.push(el('div', { style: 'margin-bottom:10px' },
+      el('span', { class: 'chip-static' }, `${done} of ${packing.length} packed`)));
+  }
+  packChildren.push(packList);
+  if (trip.canEdit) {
+    packChildren.push(el('div', { style: 'margin-top:16px' }, itemForm('packing')));
+  }
+  sections.push(card('Packing list', ...packChildren));
+
+  // --- Payments ------------------------------------------------------------
+  // Repayments between travellers. These settle what the Costs card works out;
+  // they are not trip costs and never change the total.
+  const payments = trip.payments || [];
+  const payChildren = [];
+
+  if (payments.length) {
+    const payList = el('div');
+    const nameOf = (id) => payerName(id) || 'someone';
+
+    for (const payment of payments) {
+      if (isEditing('payments', payment.id)) {
+        payList.append(editRow('payments', payment));
+        continue;
+      }
+
+      const meta = [payment.date ? formatDay(payment.date, { year: true }) : null, payment.notes]
+        .filter(Boolean).join(' · ');
+
+      payList.append(
+        el('div', { class: 'row' },
+          el('div', { class: 'row-main' },
+            el('div', { class: 'row-title' },
+              `${nameOf(payment.paidBy)} → ${nameOf(payment.paidTo)}`),
+            el('div', { class: 'row-meta' }, [payment.name, meta].filter(Boolean).join(' · '))
+          ),
+          el('div', { class: 'row-side' },
+            el('div', { class: 'amount' }, money(toCents(payment.cost), cur)),
+            rowActions('payments', payment.id)
+          )
+        )
+      );
+    }
+    payChildren.push(payList);
+  }
+
+  if (trip.canEdit) {
+    if (!trip.travellers.length) {
+      payChildren.push(el('p', { class: 'empty' }, 'Add travellers before recording a payment.'));
+    } else if (s.settlement.unpaidCents > 0) {
+      // With nothing attributed there is no debt to settle, so an empty payment
+      // form here would just look broken. Point at the thing that fixes it.
+      payChildren.push(
+        el('div', { class: 'notice', role: 'status' },
+          el('strong', {}, `${money(s.settlement.unpaidCents, cur)} still has no payer.`),
+          el('p', {}, 'Set who paid for each cost under Route first — until then '
+            + 'there is nothing to settle.'))
+      );
+    } else {
+      // One tap per outstanding transfer fills the form the right way round.
+      if (s.settlement.transfers.length) {
+        const quick = el('div', { class: 'chip-row', style: 'margin-bottom:14px' },
+          el('span', { class: 'chip-label' }, 'Record'));
+
+        for (const transfer of s.settlement.transfers) {
+          const chip = el('button', { type: 'button', class: 'chip' },
+            `${transfer.fromName} → ${transfer.toName} ${money(transfer.cents, cur)}`);
+
+          chip.addEventListener('click', async () => {
+            chip.disabled = true;
+            try {
+              render(await api(`/api/trips/${token}/payments`, {
+                method: 'POST',
+                body: JSON.stringify({
+                  name: 'Settling up',
+                  cost: (transfer.cents / 100).toFixed(2),
+                  paidBy: transfer.fromId,
+                  paidTo: transfer.toId,
+                  date: new Date().toISOString().slice(0, 10),
+                }),
+              }));
+            } catch (err) {
+              alert(err.message);
+              chip.disabled = false;
+            }
+          });
+
+          quick.append(chip);
+        }
+        payChildren.push(quick);
+      }
+
+      payChildren.push(itemForm('payments'));
+    }
+  } else if (!payments.length) {
+    payChildren.push(el('p', { class: 'empty' }, 'Nothing has been paid back yet.'));
+  }
+
+  sections.push(card('Payments', ...payChildren));
+
   // --- Sharing -------------------------------------------------------------
   if (trip.canEdit) {
     const origin = window.location.origin;
@@ -878,8 +1160,9 @@ function render(data) {
   // Sections are built in whatever order is convenient above, then arranged
   // here. On a trip that moves around, the route is what you open the page for;
   // money is the follow-up, and the share links matter least once they are sent.
-  const ORDER = ['Trip details', 'Notes', 'Route', 'Costs', 'Itinerary',
-    'Expenses', 'Places to go', 'Travellers', 'Share this trip', 'Access'];
+  const ORDER = ['Trip details', 'Notes', 'Route', 'Day by day', 'Costs', 'Payments',
+    'Things to do', 'Expenses', 'Packing list', 'Places to go', 'Travellers',
+    'Share this trip', 'Access'];
 
   const rank = (node) => {
     const heading = node.querySelector('h2');

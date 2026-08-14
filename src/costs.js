@@ -80,6 +80,26 @@ export function summarise(trip) {
     });
   }
 
+  // What each person paid toward the trip's costs, before any repayments between
+  // them. The report shows this separately, otherwise "you paid" would be a
+  // number that matches no list of items on the page.
+  const paidCostByTraveller = new Map(paidByTraveller);
+
+  // Repayments settle up between two people. A payment is not a trip cost: it
+  // must never touch totalCents, perPersonCents or anyone's share. It moves the
+  // same number of cents off one person's paid column and onto another's, so the
+  // sum of all paid is unchanged, the sum of all net is unchanged, and settle()
+  // therefore reports exactly the same unpaidCents as before.
+  for (const payment of trip.payments || []) {
+    const cents = toCents(payment.cost);
+    const { paidBy: from, paidTo: to } = payment;
+    if (cents <= 0 || !from || !to || from === to) continue;
+    if (!paidByTraveller.has(from) || !paidByTraveller.has(to)) continue;
+
+    paidByTraveller.set(from, paidByTraveller.get(from) + cents);
+    paidByTraveller.set(to, paidByTraveller.get(to) - cents);
+  }
+
   const balances = trip.travellers.map((t) => {
     const paid = paidByTraveller.get(t.id) || 0;
     const owe = oweByTraveller.get(t.id) || 0;
@@ -87,6 +107,7 @@ export function summarise(trip) {
       id: t.id,
       name: t.name,
       paidCents: paid,
+      paidCostCents: paidCostByTraveller.get(t.id) || 0,
       oweCents: owe,
       // Positive means the group owes them; negative means they owe the group.
       netCents: paid - owe,
@@ -235,10 +256,25 @@ export function personLedger(trip, travellerId) {
     }
   }
 
+  // Repayments are listed apart from `items` on purpose: a payment has no share
+  // of a cost, so folding it in would break the rule that a person's line items
+  // add up to exactly what they owe.
+  const payments = (trip.payments || [])
+    .filter((p) => p.paidBy === travellerId || p.paidTo === travellerId)
+    .map((p) => ({
+      name: p.name,
+      date: p.date || '',
+      cents: toCents(p.cost),
+      direction: p.paidBy === travellerId ? 'out' : 'in',
+      otherName: nameOf.get(p.paidBy === travellerId ? p.paidTo : p.paidBy) || '',
+    }));
+
   return {
     traveller,
     items,
+    payments,
     paidCents: balance.paidCents,
+    paidCostCents: balance.paidCostCents,
     oweCents: balance.oweCents,
     netCents: balance.netCents,
     owes: settlement.transfers
@@ -249,6 +285,80 @@ export function personLedger(trip, travellerId) {
       .map((t) => ({ fromName: t.fromName, cents: t.cents })),
     unpaidCents: settlement.unpaidCents,
   };
+}
+
+// Dates are compared and stepped in UTC. Parsing them locally shifts every date
+// back a day for anyone west of UTC, which would silently move a check-in.
+const DAY_MS = 86400000;
+
+function isIsoDate(value) {
+  return typeof value === 'string'
+    && /^\d{4}-\d{2}-\d{2}$/.test(value)
+    && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
+}
+
+function addDays(iso, days) {
+  return new Date(Date.parse(`${iso}T00:00:00Z`) + days * DAY_MS).toISOString().slice(0, 10);
+}
+
+// A trip laid out one day at a time, merging stays, activities and expenses.
+// Nothing here is stored: it is a view of data that already exists, so it never
+// goes stale when a stay is edited.
+const MAX_DAYS = 400;
+
+export function dayPlan(trip) {
+  const stays = trip.stays || [];
+  const activities = trip.activities || [];
+  const expenses = trip.expenses || [];
+
+  const dates = [
+    trip.startDate,
+    trip.endDate,
+    ...stays.flatMap((s) => [s.checkIn, s.checkOut]),
+    ...activities.map((a) => a.date),
+    ...expenses.map((e) => e.date),
+  ].filter(isIsoDate);
+
+  if (!dates.length) return [];
+
+  const first = dates.reduce((a, b) => (a < b ? a : b));
+  const last = dates.reduce((a, b) => (a > b ? a : b));
+
+  // A mistyped year would otherwise walk thousands of days and lock up the page.
+  const span = Math.round((Date.parse(`${last}T00:00:00Z`) - Date.parse(`${first}T00:00:00Z`)) / DAY_MS);
+  if (span > MAX_DAYS) return [];
+
+  const days = [];
+  for (let i = 0; i <= span; i += 1) {
+    const date = addDays(first, i);
+
+    // Half-open, matching nightsBetween: you sleep somewhere on its check-in
+    // date but not on its check-out date. Without this every day where one stay
+    // ends and the next begins would match two stays — and on a road trip that
+    // is nearly every day.
+    const stay = stays.find((s) => s.checkIn && s.checkOut && s.checkIn <= date && date < s.checkOut)
+      || null;
+
+    const onThisDay = activities
+      .filter((a) => a.date === date)
+      .sort((a, b) => (a.time || '99:99').localeCompare(b.time || '99:99'));
+    const spentThisDay = expenses.filter((e) => e.date === date);
+
+    days.push({
+      date,
+      index: i + 1,
+      stay,
+      arriving: stays.filter((s) => s.checkIn === date),
+      departing: stays.filter((s) => s.checkOut === date),
+      activities: onThisDay,
+      expenses: spentThisDay,
+      // Only what happens on the day itself. A five-night booking is one cost on
+      // its check-in date, not a fifth of a cost on each of five days.
+      costCents: [...onThisDay, ...spentThisDay].reduce((sum, item) => sum + toCents(item.cost), 0),
+    });
+  }
+
+  return days;
 }
 
 // Nights in the trip's date range that no stay covers, so unbooked stretches are

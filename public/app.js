@@ -17,6 +17,16 @@ export function el(tag, attrs = {}, ...children) {
   return node;
 }
 
+// Mirrors toCents in src/costs.js, which is the canonical version. Plain
+// Number() is not enough: a cost typed as "$45" or "1,200" parses to NaN and
+// renders as zero, while the server totals it correctly.
+export function toCents(value) {
+  if (value === '' || value === null || value === undefined) return 0;
+  const n = typeof value === 'number' ? value : Number(String(value).replace(/[^0-9.-]/g, ''));
+  if (!Number.isFinite(n)) return 0;
+  return Math.round(n * 100);
+}
+
 export function money(cents, currency = 'AUD') {
   try {
     return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format((cents || 0) / 100);

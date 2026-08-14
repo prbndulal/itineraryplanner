@@ -4,11 +4,15 @@ Plan a trip, track what it costs, and share it with everyone coming along.
 
 - **Route** — stays drawn as a journey: each stop in date order, nights, per-night
   rate, and a marker on any stretch of the trip with nowhere booked
-- **Itinerary** — activities with date, time, location, cost
+- **Things to do** — tours, bookings and activities with date, time, location, cost
 - **Expenses** — everything else: meals, taxis, tickets, by category and date
 - **Travellers** — who is coming, who paid for what
 - **Costs** — running total, category breakdown, and who owes whom
+- **Day by day** — the trip read along the calendar: where you sleep each night,
+  what is planned, and what it costs
 - **Settling up** — turns the balances into "X pays Y" so the group can square up
+- **Payments** — record a repayment and watch the debt shrink; never counted as a trip cost
+- **Packing list** — a shared checklist everyone can see and the trip owner can tick
 - **Reports** — a printable per-person statement of what they owe or are owed
 - **Splitting** — each cost can be shared by the whole group or just the people it was for
 - **Places to go** — attraction suggestions near the destination, from OpenStreetMap
@@ -128,6 +132,33 @@ to read sets an attribute on `<body>`, and one CSS rule hides the others — so
 what prints is exactly what is on screen. The print stylesheet also redeclares
 the light palette, because the dark-mode media query still matches when printing
 from a dark-mode machine and would otherwise produce a black page.
+
+**A repayment is not a trip cost.** Settling up moves money between two people:
+it adds to what the payer has paid and subtracts the same amount from the
+recipient, so the group's total paid is unchanged, the balances still net to
+zero, and the trip total never moves. Because it only ever touches the paid
+column, `settle()` needs no special case — the shorter transfer list falls out
+of the reduced net positions. Putting a payment on the `owe` side instead would
+still net to zero and still pass most tests, while quietly reporting the wrong
+numbers, so the tests assert that nobody's share changes.
+
+**Day by day is a projection, never stored.** It is computed from the stays,
+activities and expenses that already exist, so editing a stay can't leave a
+stale copy behind. A day's stay is the one where `checkIn <= day < checkOut`:
+half-open, so the day you check out is not a night you slept there. On a road
+trip where one booking ends the morning the next begins, an inclusive comparison
+would put two stays on nearly every day.
+
+**Done-state is TEXT, like everything else in the table.** Every column is TEXT
+and `cleanText` turns whatever arrives into a string, so a real boolean column
+would reject the empty string an unticked box sends. The flag is stored as `'1'`
+or `''` and converted at the two boundaries that already do this kind of work
+for costs and split lists, which keeps the generic read and write paths generic.
+
+**Ticking a packing item needs the edit link.** The read-only link is the only
+other credential, and letting it write — even one field — would be the first
+hole in the single gate that protects everything else. View links see the list
+and the progress count with the checkboxes disabled.
 
 **Item writes are scoped by trip.** Update and delete queries match on
 `trip_id` as well as item id, so a token for one trip cannot touch another

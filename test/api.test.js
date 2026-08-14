@@ -559,3 +559,162 @@ test('unbooked nights are reported with the trip', async () => {
     { from: '2026-10-04', to: '2026-10-09', nights: 5 },
   ]);
 });
+
+// --- packing list and recorded payments -------------------------------------
+
+test('a read-only link cannot touch the new sections either', async () => {
+  const trip = await makeTrip();
+
+  const pack = await call('POST', `/api/trips/${trip.viewToken}/packing`, { name: 'Sunscreen' });
+  assert.equal(pack.status, 403);
+
+  const pay = await call('POST', `/api/trips/${trip.viewToken}/payments`, { name: 'Sneaky' });
+  assert.equal(pay.status, 403);
+});
+
+test('a packing item stores done as a real boolean', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  const added = await call('POST', `/api/trips/${t}/packing`, { name: 'Sunscreen' });
+  assert.equal(added.status, 201);
+  assert.equal(added.body.packing[0].done, false, 'a new item starts unpacked');
+
+  const itemId = added.body.packing[0].id;
+  const ticked = await call('PATCH', `/api/trips/${t}/packing/${itemId}`, { done: true });
+  assert.equal(ticked.status, 200);
+
+  const item = ticked.body.packing[0];
+  // The column is TEXT, so this is what proves the encoding boundary works
+  // rather than leaking '1' through to the client.
+  assert.equal(item.done, true);
+  assert.equal(typeof item.done, 'boolean');
+  assert.equal(item.name, 'Sunscreen', 'ticking must not disturb the name');
+
+  const unticked = await call('PATCH', `/api/trips/${t}/packing/${itemId}`, { done: false });
+  assert.equal(unticked.body.packing[0].done, false);
+});
+
+test('an unrecognised done value counts as not packed', async () => {
+  const trip = await makeTrip();
+  const added = await call('POST', `/api/trips/${trip.editToken}/packing`, { name: 'Towel' });
+  const itemId = added.body.packing[0].id;
+
+  const res = await call('PATCH', `/api/trips/${trip.editToken}/packing/${itemId}`, { done: 'yes' });
+  assert.equal(res.status, 200, 'a strange value must not crash the request');
+  assert.equal(res.body.packing[0].done, false);
+});
+
+test('a packing list never affects the money', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  await call('POST', `/api/trips/${t}/travellers`, { name: 'Prabin' });
+  await call('POST', `/api/trips/${t}/packing`, { name: 'Tent' });
+  const res = await call('POST', `/api/trips/${t}/packing`, { name: 'Boots' });
+
+  assert.equal(res.body.summary.totalCents, 0);
+  assert.equal(res.body.summary.balances[0].netCents, 0);
+});
+
+test('a recorded payment settles a debt without changing the total', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  const withA = await call('POST', `/api/trips/${t}/travellers`, { name: 'Prabin' });
+  const prabinId = withA.body.travellers[0].id;
+  const withB = await call('POST', `/api/trips/${t}/travellers`, { name: 'Sam' });
+  const samId = withB.body.travellers.find((x) => x.name === 'Sam').id;
+
+  const stay = await call('POST', `/api/trips/${t}/stays`, {
+    name: 'Hotel',
+    cost: '300.00',
+    paidBy: prabinId,
+  });
+  assert.equal(stay.body.summary.settlement.transfers.length, 1);
+
+  const paid = await call('POST', `/api/trips/${t}/payments`, {
+    name: 'Bank transfer',
+    cost: '150.00',
+    paidBy: samId,
+    paidTo: prabinId,
+    date: '2026-10-10',
+  });
+
+  assert.equal(paid.status, 201);
+  const summary = paid.body.summary;
+  assert.equal(summary.totalCents, 30000, 'a repayment is not a trip cost');
+  assert.equal(summary.stayCents, 30000);
+  assert.deepEqual(summary.byCategory, {});
+  assert.deepEqual(summary.settlement.transfers, [], 'the debt is settled');
+  assert.equal(summary.settlement.settled, true);
+
+  // Everyone's share of the costs is untouched by settling up.
+  for (const b of summary.balances) assert.equal(b.oweCents, 15000);
+});
+
+test('a payment needs two different, known people and an amount', async () => {
+  const trip = await makeTrip();
+  const other = await makeTrip('Somewhere else');
+  const t = trip.editToken;
+
+  const withA = await call('POST', `/api/trips/${t}/travellers`, { name: 'Prabin' });
+  const prabinId = withA.body.travellers[0].id;
+  await call('POST', `/api/trips/${t}/travellers`, { name: 'Sam' });
+
+  const stranger = await call('POST', `/api/trips/${other.editToken}/travellers`, { name: 'Nobody' });
+  const strangerId = stranger.body.travellers[0].id;
+
+  const cases = [
+    [{ name: 'No recipient', cost: '10', paidBy: prabinId }, 'missing recipient'],
+    [{ name: 'No payer', cost: '10', paidTo: prabinId }, 'missing payer'],
+    [{ name: 'To themselves', cost: '10', paidBy: prabinId, paidTo: prabinId }, 'same person'],
+    [{ name: 'Zero', cost: '0', paidBy: prabinId, paidTo: strangerId }, 'nothing to pay'],
+    [{ name: 'Outsider', cost: '10', paidBy: prabinId, paidTo: strangerId }, 'another trip'],
+  ];
+
+  for (const [body, why] of cases) {
+    const res = await call('POST', `/api/trips/${t}/payments`, body);
+    assert.equal(res.status, 400, `rejected: ${why}`);
+  }
+});
+
+test('removing a traveller removes the payments they were part of', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  const withA = await call('POST', `/api/trips/${t}/travellers`, { name: 'Prabin' });
+  const prabinId = withA.body.travellers[0].id;
+  const withB = await call('POST', `/api/trips/${t}/travellers`, { name: 'Sam' });
+  const samId = withB.body.travellers.find((x) => x.name === 'Sam').id;
+
+  await call('POST', `/api/trips/${t}/stays`, { name: 'Hotel', cost: '300.00', paidBy: prabinId });
+  await call('POST', `/api/trips/${t}/payments`, {
+    name: 'Transfer', cost: '150.00', paidBy: samId, paidTo: prabinId,
+  });
+
+  const after = await call('DELETE', `/api/trips/${t}/travellers/${samId}`);
+  assert.equal(after.status, 200);
+  assert.deepEqual(after.body.payments, [], 'a payment with a missing party is meaningless');
+  assert.equal(after.body.summary.balances.reduce((sum, b) => sum + b.netCents, 0), 0);
+});
+
+test('the day plan reaches a read-only link without the edit token', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  await call('PATCH', `/api/trips/${t}`, { startDate: '2026-09-25', endDate: '2026-09-29' });
+  await call('POST', `/api/trips/${t}/stays`, {
+    name: 'Cairns', checkIn: '2026-09-25', checkOut: '2026-09-28', cost: '300.00',
+  });
+
+  const shared = await call('GET', `/api/trips/${trip.viewToken}`);
+  assert.equal(shared.status, 200);
+  assert.equal(shared.body.editToken, undefined);
+
+  const days = shared.body.summary.days;
+  assert.equal(days.length, 5, '25 to 29 September inclusive');
+  assert.equal(days.filter((d) => d.stay).length, 3, 'three nights booked');
+  assert.equal(days[0].arriving[0].name, 'Cairns');
+  assert.equal(days.find((d) => d.date === '2026-09-28').stay, null, 'checkout day is not a night');
+});

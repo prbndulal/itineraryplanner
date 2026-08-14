@@ -3,7 +3,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import * as store from './store.js';
 import * as places from './places.js';
-import { summarise, nightsBetween, formatCents, settle, accommodationGaps } from './costs.js';
+import {
+  summarise,
+  nightsBetween,
+  formatCents,
+  settle,
+  accommodationGaps,
+  dayPlan,
+  toCents,
+} from './costs.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -34,6 +42,7 @@ function present(trip, canEdit) {
       ...summary,
       settlement: settle(summary.balances),
       gaps: accommodationGaps(trip),
+      days: dayPlan(trip),
     },
   };
 }
@@ -85,10 +94,19 @@ const COLLECTION_FIELDS = {
   activities: ['name', 'date', 'time', 'location', 'cost', 'paidBy', 'notes'],
   travellers: ['name', 'email', 'notes'],
   expenses: ['name', 'category', 'date', 'location', 'cost', 'paidBy', 'notes'],
+  payments: ['name', 'date', 'cost', 'paidBy', 'paidTo', 'notes'],
+  // `done` is missing on purpose: cleanText would turn a boolean into a string
+  // and store "false" as a truthy value. It is handled explicitly below.
+  packing: ['name', 'assignedTo', 'notes'],
 };
 
 // Collections whose items carry a cost that can be split across a subset of the
 // group. Travellers are people, not costs, so they are not in this set.
+//
+// Payments must never be added here. `paidTo` and `sharedBy` share the
+// shared_by column, so running cleanSharedBy over a payment would overwrite its
+// recipient with an empty list, leaving an inert row and a settlement that
+// quietly never shrinks.
 const SPLITTABLE = new Set(['stays', 'activities', 'expenses']);
 
 // The list of people a cost is split between arrives as an array of traveller
@@ -131,6 +149,34 @@ function buildItem(collection, body, trip, { requireName = true } = {}) {
     // Stored as a comma-separated column; an empty value means "everyone", which
     // is how items behaved before per-item splitting existed.
     item.sharedBy = cleanSharedBy(body.sharedBy, trip.travellers).join(',');
+  }
+
+  if (collection === 'packing' && 'done' in body) {
+    // The column is TEXT like every other one, so the boolean is encoded here
+    // and decoded in rowToItem. Anything that isn't a recognised "yes" counts as
+    // not done, so a stray value can never leave an item ambiguously ticked.
+    const done = body.done;
+    item.done = done === true || done === 'true' || done === '1' || done === 1 ? '1' : '';
+  }
+
+  if (collection === 'payments') {
+    // A payment moves money between two people, so both ends have to be real and
+    // distinct. Without this a typo would produce a row that silently does
+    // nothing, since summarise ignores payments it cannot resolve.
+    const known = new Set(trip.travellers.map((t) => t.id));
+
+    if (requireName || 'paidBy' in body) {
+      if (!item.paidBy || !known.has(item.paidBy)) return { error: 'Who paid?' };
+    }
+    if (requireName || 'paidTo' in body) {
+      if (!item.paidTo || !known.has(item.paidTo)) return { error: 'Who were they paying?' };
+    }
+    if (item.paidBy && item.paidTo && item.paidBy === item.paidTo) {
+      return { error: 'A payment needs two different people' };
+    }
+    if ((requireName || 'cost' in body) && toCents(item.cost) <= 0) {
+      return { error: 'A payment needs an amount' };
+    }
   }
 
   return { item };
