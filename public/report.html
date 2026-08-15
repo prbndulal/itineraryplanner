@@ -237,17 +237,37 @@ function personReport(balance) {
     ));
 
     const packBody = el('tbody');
+
+    // Grouped the same way the list itself is, so the printed sheet matches what
+    // you were looking at on screen. Order comes from the items' own order.
+    const seen = [];
     for (const item of mine) {
-      packBody.append(
-        el('tr', {},
-          el('td', {},
-            el('div', {}, item.name),
-            item.notes ? el('div', { class: 'sub' }, item.notes) : null),
-          // A tick alone would vanish on a mono printer, so the state is spelled
-          // out in words as well.
-          el('td', { class: 'num' }, item.done ? '✓ packed' : 'not yet')
-        )
-      );
+      const key = item.group || 'Uncategorised';
+      if (!seen.includes(key)) seen.push(key);
+    }
+
+    for (const key of seen) {
+      const inGroup = mine.filter((p) => (p.group || 'Uncategorised') === key);
+      if (seen.length > 1) {
+        packBody.append(
+          el('tr', { class: 'group-row' },
+            el('td', { colspan: '2' }, key)
+          )
+        );
+      }
+
+      for (const item of inGroup) {
+        packBody.append(
+          el('tr', {},
+            el('td', {},
+              el('div', {}, item.name),
+              item.notes ? el('div', { class: 'sub' }, item.notes) : null),
+            // A tick alone would vanish on a mono printer, so the state is
+            // spelled out in words as well.
+            el('td', { class: 'num' }, item.done ? '✓ packed' : 'not yet')
+          )
+        );
+      }
     }
     packTable.append(packBody);
 

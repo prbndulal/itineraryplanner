@@ -976,3 +976,85 @@ test('a read-only link cannot assign a packing item', async () => {
     { assignedTo: prabin });
   assert.equal(res.status, 403);
 });
+
+// --- packing categories -----------------------------------------------------
+
+test('a packing item carries a category', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  const added = await call('POST', `/api/trips/${t}/packing`, {
+    name: 'Pressure Cooker',
+    group: 'Cooking gear',
+  });
+  assert.equal(added.status, 201);
+  assert.equal(added.body.packing[0].group, 'Cooking gear');
+
+  const itemId = added.body.packing[0].id;
+  const moved = await call('PATCH', `/api/trips/${t}/packing/${itemId}`, { group: 'Gear & other' });
+  assert.equal(moved.body.packing[0].group, 'Gear & other');
+
+  const cleared = await call('PATCH', `/api/trips/${t}/packing/${itemId}`, { group: '' });
+  assert.equal(cleared.body.packing[0].group, '');
+  assert.equal(cleared.body.packing[0].name, 'Pressure Cooker', 'the name survives');
+});
+
+test('category, packed state and assignment do not disturb each other', async () => {
+  // All three are single-field patches on the same row, and two of them share a
+  // column with something else, so it is worth pinning that they stay separate.
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  const withA = await call('POST', `/api/trips/${t}/travellers`, { name: 'Prabin' });
+  const prabin = withA.body.travellers[0].id;
+
+  const added = await call('POST', `/api/trips/${t}/packing`, { name: 'Rice - 10 kg' });
+  const itemId = added.body.packing[0].id;
+
+  await call('PATCH', `/api/trips/${t}/packing/${itemId}`, { group: 'Dry goods' });
+  await call('PATCH', `/api/trips/${t}/packing/${itemId}`, { assignedTo: prabin });
+  const ticked = await call('PATCH', `/api/trips/${t}/packing/${itemId}`, { done: true });
+
+  const item = ticked.body.packing[0];
+  assert.equal(item.group, 'Dry goods');
+  assert.equal(item.assignedTo, prabin);
+  assert.equal(item.done, true);
+  assert.equal(typeof item.done, 'boolean', 'done must not leak its stored form');
+
+  // And changing the category leaves the other two alone.
+  const regrouped = await call('PATCH', `/api/trips/${t}/packing/${itemId}`, { group: 'Fresh' });
+  assert.equal(regrouped.body.packing[0].done, true);
+  assert.equal(regrouped.body.packing[0].assignedTo, prabin);
+  assert.equal(regrouped.body.packing[0].group, 'Fresh');
+});
+
+test('a category can be anything, not just the suggested ones', async () => {
+  const trip = await makeTrip();
+  const added = await call('POST', `/api/trips/${trip.editToken}/packing`, {
+    name: 'Fishing rod',
+    group: 'Fishing',
+  });
+  assert.equal(added.body.packing[0].group, 'Fishing');
+});
+
+test('categories never touch the money', async () => {
+  const trip = await makeTrip();
+  const t = trip.editToken;
+
+  await call('POST', `/api/trips/${t}/travellers`, { name: 'Prabin' });
+  const res = await call('POST', `/api/trips/${t}/packing`, {
+    name: 'Karai',
+    group: 'Cooking gear',
+  });
+
+  assert.equal(res.body.summary.totalCents, 0);
+  assert.deepEqual(res.body.summary.byCategory, {}, 'a packing category is not an expense category');
+});
+
+test('a read-only link cannot recategorise an item', async () => {
+  const trip = await makeTrip();
+  const added = await call('POST', `/api/trips/${trip.editToken}/packing`, { name: 'Tent' });
+  const res = await call('PATCH', `/api/trips/${trip.viewToken}/packing/${added.body.packing[0].id}`,
+    { group: 'Gear & other' });
+  assert.equal(res.status, 403);
+});

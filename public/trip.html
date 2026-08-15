@@ -224,6 +224,18 @@ function makeDraggable(row, collection, index) {
 const EXPENSE_CATEGORIES = ['Food & drink', 'Transport', 'Tickets', 'Shopping', 'Fees', 'Other'];
 const MEAL_SLOTS = ['Breakfast', 'Lunch', 'Dinner', 'Snacks'];
 
+// Ordered the way a shop is walked and a car is loaded: perishables last because
+// they need the cool box, gear first because it goes in the boot.
+const PACKING_GROUPS = [
+  'Cooking gear',
+  'Dry goods',
+  'Spices & sauces',
+  'Snacks & drinks',
+  'Fresh',
+  'Cleaning',
+  'Gear & other',
+];
+
 // The same field list drives the add form and the edit form for a collection,
 // so anything that can be created can also be changed afterwards.
 function fieldsFor(collection, cur) {
@@ -258,7 +270,11 @@ function fieldsFor(collection, cur) {
     ];
   }
   if (collection === 'packing') {
-    return [{ key: 'name', label: 'Item', placeholder: 'Sunscreen' }];
+    return [
+      { key: 'name', label: 'Item', placeholder: 'Rice - 10 kg' },
+      // A datalist, so the usual groups are one tap but a new one can be typed.
+      { key: 'group', label: 'Category', list: PACKING_GROUPS, placeholder: 'Dry goods' },
+    ];
   }
   if (collection === 'meals') {
     // No date field: a meal is always added from the day it belongs to, so the
@@ -1149,57 +1165,94 @@ function render(data) {
   const packing = trip.packing || [];
   const packList = el('div');
 
+  // One item, wherever it ends up sitting. `index` is its position in the whole
+  // list, not within its group, so reordering still moves it through the real
+  // list rather than a slice of it.
+  const packingRow = (entry, index) => {
+    if (isEditing('packing', entry.id)) return editRow('packing', entry);
+
+    const box = el('input', { type: 'checkbox' });
+    box.checked = entry.done;
+    // Ticking is a write, so a read-only link can see the list and the progress
+    // but cannot change it.
+    if (!trip.canEdit) box.disabled = true;
+
+    box.addEventListener('change', async () => {
+      box.disabled = true;
+      try {
+        render(await api(`/api/trips/${token}/packing/${entry.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ done: box.checked }),
+        }));
+      } catch (err) {
+        alert(err.message);
+        box.checked = entry.done;
+        box.disabled = false;
+      }
+    });
+
+    // Shown to everyone; the chips below are only rendered for an edit link, so
+    // a read-only viewer still sees who is bringing what.
+    const bringer = travellerName(entry.assignedTo);
+
+    return makeDraggable(
+      el('div', { class: entry.done ? 'row packed' : 'row' },
+        el('div', { class: 'row-main' },
+          el('label', { class: 'sharer' }, box, el('span', { class: 'row-title' }, entry.name)),
+          bringer ? el('div', { class: 'row-meta' }, `${bringer} is bringing this`) : null,
+          entry.notes ? el('div', { class: 'row-meta' }, entry.notes) : null,
+          personChips('packing', entry, 'assignedTo', 'Who is bringing it')
+        ),
+        el('div', { class: 'row-side' },
+          reorderButtons('packing', entry.id, index, packing.length),
+          rowActions('packing', entry.id))
+      ),
+      'packing',
+      index
+    );
+  };
+
   if (!packing.length) {
     packList.append(el('p', { class: 'empty' },
       trip.canEdit ? 'Nothing on the list yet.' : 'No packing list for this trip.'));
   } else {
+    // Grouped by category, because a shop is walked aisle by aisle and a car is
+    // loaded by kind of thing. Groups follow the order in PACKING_GROUPS;
+    // anything typed in that is not on that list follows, and uncategorised
+    // items come last so they read as still needing a decision.
+    const byGroup = new Map();
     packing.forEach((entry, index) => {
-      if (isEditing('packing', entry.id)) {
-        packList.append(editRow('packing', entry));
-        return;
+      const key = entry.group || '';
+      if (!byGroup.has(key)) byGroup.set(key, []);
+      byGroup.get(key).push({ entry, index });
+    });
+
+    const rank = (name) => {
+      if (!name) return PACKING_GROUPS.length + 1;
+      const at = PACKING_GROUPS.indexOf(name);
+      return at === -1 ? PACKING_GROUPS.length : at;
+    };
+
+    const keys = [...byGroup.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+
+    for (const key of keys) {
+      const rows = byGroup.get(key);
+      const packed = rows.filter((r) => r.entry.done).length;
+
+      // A single group is the whole list, so a heading over it says nothing.
+      if (keys.length > 1) {
+        packList.append(
+          el('div', { class: 'group-head' },
+            el('span', {}, key || 'Uncategorised'),
+            el('span', { class: 'group-count' }, `${packed}/${rows.length}`)
+          )
+        );
       }
 
-      const box = el('input', { type: 'checkbox' });
-      box.checked = entry.done;
-      // Ticking is a write, so a read-only link can see the list and the
-      // progress but cannot change it.
-      if (!trip.canEdit) box.disabled = true;
-
-      box.addEventListener('change', async () => {
-        box.disabled = true;
-        try {
-          render(await api(`/api/trips/${token}/packing/${entry.id}`, {
-            method: 'PATCH',
-            body: JSON.stringify({ done: box.checked }),
-          }));
-        } catch (err) {
-          alert(err.message);
-          box.checked = entry.done;
-          box.disabled = false;
-        }
-      });
-
-      // Shown to everyone; the chips below are only rendered for an edit link,
-      // so a read-only viewer still sees who is bringing what.
-      const bringer = travellerName(entry.assignedTo);
-
-      packList.append(makeDraggable(
-        el('div', { class: entry.done ? 'row packed' : 'row' },
-          el('div', { class: 'row-main' },
-            el('label', { class: 'sharer' }, box, el('span', { class: 'row-title' }, entry.name)),
-            bringer ? el('div', { class: 'row-meta' }, `${bringer} is bringing this`) : null,
-            entry.notes ? el('div', { class: 'row-meta' }, entry.notes) : null,
-            personChips('packing', entry, 'assignedTo', 'Who is bringing it')
-          ),
-          el('div', { class: 'row-side' },
-            reorderButtons('packing', entry.id, index, packing.length),
-            rowActions('packing', entry.id))
-        ),
-        'packing',
-        index
-      ));
-    });
+      for (const { entry, index } of rows) packList.append(packingRow(entry, index));
+    }
   }
+
 
   const inner = el('div', {}, packList);
   if (trip.canEdit) {

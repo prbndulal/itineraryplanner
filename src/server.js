@@ -97,7 +97,7 @@ const COLLECTION_FIELDS = {
   payments: ['name', 'date', 'cost', 'paidBy', 'paidTo', 'notes'],
   // `done` is missing on purpose: cleanText would turn a boolean into a string
   // and store "false" as a truthy value. It is handled explicitly below.
-  packing: ['name', 'assignedTo', 'notes'],
+  packing: ['name', 'assignedTo', 'group', 'notes'],
   // Meals carry no cost: what you spend on food is an expense, which is a
   // separate thing from a plan of what you are going to eat.
   meals: ['name', 'date', 'slot', 'time', 'location', 'notes'],

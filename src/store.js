@@ -161,6 +161,11 @@ function rowToItem(row) {
     Object.assign(item, {
       done: row.category === '1',
       assignedTo: row.paid_by,
+      // What kind of thing it is — fresh food, cooking gear, cleaning. Named
+      // `group` rather than `category` because done-state already occupies the
+      // `category` column, so this borrows `location`, which a packing item has
+      // no other use for.
+      group: row.location,
     });
   } else if (row.kind === 'meals') {
     // What you plan to eat and when. `category` holds the sitting — breakfast,
@@ -203,6 +208,7 @@ const COLUMNS = {
   paidTo: 'shared_by',
   done: 'category',
   slot: 'category',
+  group: 'location',
   // Who is bringing a packing item. Shares paid_by with the payer of a cost,
   // which also means forgetTraveller() already clears it when someone leaves.
   assignedTo: 'paid_by',

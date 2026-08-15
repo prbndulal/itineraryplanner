@@ -378,6 +378,41 @@ body:not([data-person="all"]) .person-report.is-selected { display: block; }
 }
 
 
+/* A heading inside a list, marking where one category ends and the next
+   begins. Sticky so the category stays visible while scrolling a long group. */
+.group-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin: 18px 0 2px;
+  padding: 6px 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.group-head:first-child { margin-top: 0; }
+.group-count { font-variant-numeric: tabular-nums; font-weight: 550; }
+
+/* A category divider inside the report's ledger table. */
+.ledger .group-row td {
+  padding-top: 12px;
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+
 /* --- app shell ----------------------------------------------------------- */
 
 /* Room for the fixed tab bar, plus the home-indicator area on a modern phone. */

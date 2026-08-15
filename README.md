@@ -12,7 +12,8 @@ Plan a trip, track what it costs, and share it with everyone coming along.
   what is planned, what it costs, and what you are eating
 - **Settling up** — turns the balances into "X pays Y" so the group can square up
 - **Payments** — record a repayment and watch the debt shrink; never counted as a trip cost
-- **Packing list** — a shared checklist: tick things off and say who is bringing what
+- **Packing list** — a shared checklist grouped by category: tick things off, say who
+  is bringing what, and see each group's progress
 - **Meals** — planned inside each day of the trip, alongside where you are sleeping
 - **Reordering** — drag a row on a desktop, or use the ↑↓ buttons anywhere
 - **Reports** — a printable per-person statement: what they owe or are owed, and what they are bringing
@@ -172,6 +173,14 @@ question you ask while looking at a particular day, so the form lives in that
 day and inherits its date rather than asking for one. Everything else in the day
 view is read-only and edited in its own section, which keeps one place per kind
 of thing; meals are the exception because the day *is* their natural home.
+
+**Packing categories borrow the `location` column.** Packing already uses
+`category` for done-state, so the group a thing belongs to — cooking gear, dry
+goods, fresh — is stored in `location`, which a packing item has no other use
+for. It is exposed as `group` rather than `category` so nothing reads as though
+it were the expense category, which is a different thing entirely. Suggested
+groups are a datalist, not a fixed set: a trip that needs a Fishing category can
+just type one.
 
 **Long sections fold away, and remember whether they were open.** The packing
 list runs to dozens of items, which would otherwise bury everything below it on
