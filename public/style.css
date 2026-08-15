@@ -377,6 +377,90 @@ body:not([data-person="all"]) .person-report.is-selected { display: block; }
   .tile .v { font-size: 17px; }
 }
 
+
+/* --- app shell ----------------------------------------------------------- */
+
+/* Room for the fixed tab bar, plus the home-indicator area on a modern phone. */
+.wrap.app { padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px)); }
+
+.tabbar {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  z-index: 20;
+  display: flex;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  /* Sits above the page rather than blending into it. */
+  box-shadow: 0 -1px 12px rgba(16, 24, 40, 0.06);
+}
+
+@media (prefers-color-scheme: dark) {
+  .tabbar { box-shadow: 0 -1px 0 var(--border); }
+}
+
+.tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  /* 52px of height before the safe-area inset: comfortably past the ~44px
+     minimum for a thumb. */
+  padding: 9px 4px 8px;
+  background: none;
+  border: none;
+  border-radius: 0;
+  color: var(--muted);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.tab:hover:not(:disabled) { color: var(--text); background: none; filter: none; }
+.tab:disabled { opacity: 0.35; cursor: default; }
+.tab.is-active { color: var(--accent); }
+
+.tab-icon { font-size: 19px; line-height: 1; }
+.tab-label { font-size: 11px; letter-spacing: 0.01em; }
+
+/* A short bar above the active tab, the way a native tab bar marks position. */
+.tab.is-active::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  width: 26px;
+  height: 2px;
+  border-radius: 0 0 2px 2px;
+  background: var(--accent);
+}
+.tab { position: relative; }
+
+/* The trip name stays put while you scroll a long list. */
+.hero {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+@media (max-width: 560px) {
+  /* Cards run edge to edge like an app's grouped lists, rather than sitting in
+     a column with a gutter either side. */
+  .wrap.app { padding-left: 0; padding-right: 0; padding-top: 0; }
+
+  .wrap.app .card,
+  .wrap.app .hero {
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+    margin-bottom: 12px;
+  }
+
+  .wrap.app .hero { padding-top: calc(14px + env(safe-area-inset-top, 0px)); }
+
+  .tab-icon { font-size: 21px; }
+  .tab-label { font-size: 11px; }
+}
+
 /* --- print --------------------------------------------------------------- */
 
 /* This block is last on purpose. The dark-mode block above still matches when
@@ -407,9 +491,14 @@ body:not([data-person="all"]) .person-report.is-selected { display: block; }
 
   /* Anything interactive is meaningless on paper. Map links go too: a printed
      "Open map" is dead text, so the address carries the location instead. */
-  button, form, .person-tabs, .chip-row, .row-actions, .share, .maplink, .no-print {
+  button, form, .person-tabs, .chip-row, .row-actions, .share, .maplink, .no-print,
+  .tabbar {
     display: none !important;
   }
+
+  /* The sticky header and the tab bar's clearance are screen furniture. */
+  .hero { position: static; }
+  .wrap.app { padding-bottom: 0; }
 
   .card, .hero, .verdict {
     box-shadow: none;

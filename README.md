@@ -15,12 +15,14 @@ Plan a trip, track what it costs, and share it with everyone coming along.
 - **Packing list** — a shared checklist: tick things off and say who is bringing what
 - **Meals** — planned inside each day of the trip, alongside where you are sleeping
 - **Reordering** — drag a row on a desktop, or use the ↑↓ buttons anywhere
-- **Reports** — a printable per-person statement of what they owe or are owed
+- **Reports** — a printable per-person statement: what they owe or are owed, and what they are bringing
 - **Splitting** — each cost can be shared by the whole group or just the people it was for
 - **Places to go** — attraction suggestions near the destination, from OpenStreetMap
 - **Sharing** — every trip has a read-only link and an edit link; no accounts needed
 
 Everything is editable in place; amounts default to AUD and can be changed per trip.
+The trip page is laid out like a phone app: sections sit behind a bottom tab bar
+rather than one long scroll.
 
 ## Running locally
 
@@ -150,6 +152,20 @@ stale copy behind. A day's stay is the one where `checkIn <= day < checkOut`:
 half-open, so the day you check out is not a night you slept there. On a road
 trip where one booking ends the morning the next begins, an inclusive comparison
 would put two stays on nearly every day.
+
+**The trip page is a tab bar, not a scroll.** Thirteen sections in one column
+is a very long page on a phone, so they are grouped into Trip, Days, Money,
+Packing and More, with a fixed bar at the bottom where a thumb can reach it. A
+card whose title is not listed in a tab falls through to More rather than
+disappearing, so forgetting to file a new section is visible instead of silent.
+The active tab lives in the URL hash, which means a reload comes back to the
+same place.
+
+**The tab bar and sticky header are screen furniture.** Both are hidden when
+printing, along with the padding that reserves space for them, so a printed page
+is not left with a gap at the bottom for a bar that isn't there. Layout also
+respects `env(safe-area-inset-*)` so the bar clears the home indicator on a
+modern phone rather than sitting under it.
 
 **Meals are planned on the day, not in a list of their own.** What to eat is a
 question you ask while looking at a particular day, so the form lives in that

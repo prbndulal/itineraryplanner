@@ -224,6 +224,44 @@ function personReport(balance) {
       el('p', { class: 'empty' }, 'No costs recorded against this person yet.')));
   }
 
+  // What this person is responsible for bringing. Printed, this is the half of
+  // the report you actually carry around, so it goes above the group's money.
+  const mine = (trip.packing || []).filter((p) => p.assignedTo === balance.id);
+  if (mine.length) {
+    const packTable = el('table', { class: 'ledger' });
+    packTable.append(el('thead', {},
+      el('tr', {},
+        el('th', {}, `What you are bringing (${mine.length})`),
+        el('th', { class: 'num' }, 'Packed')
+      )
+    ));
+
+    const packBody = el('tbody');
+    for (const item of mine) {
+      packBody.append(
+        el('tr', {},
+          el('td', {},
+            el('div', {}, item.name),
+            item.notes ? el('div', { class: 'sub' }, item.notes) : null),
+          // A tick alone would vanish on a mono printer, so the state is spelled
+          // out in words as well.
+          el('td', { class: 'num' }, item.done ? '✓ packed' : 'not yet')
+        )
+      );
+    }
+    packTable.append(packBody);
+
+    const packed = mine.filter((p) => p.done).length;
+    packTable.append(el('tfoot', {},
+      el('tr', {},
+        el('td', {}, 'Packed so far'),
+        el('td', { class: 'num' }, `${packed} of ${mine.length}`)
+      )
+    ));
+
+    section.append(card('Your packing list', packTable));
+  }
+
   // The whole group's position, so the recipient can see the full picture
   // rather than having to take their own number on trust.
   const groupTable = el('table', { class: 'ledger' });

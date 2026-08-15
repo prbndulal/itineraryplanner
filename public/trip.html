@@ -7,10 +7,11 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<div class="wrap">
+<div class="wrap app">
   <div id="hero"></div>
   <div id="content"></div>
 </div>
+<div id="tabbar"></div>
 
 <script type="module">
 import { api, money, el, toCents } from '/app.js';
@@ -31,6 +32,10 @@ let editing = null;
 // Which day has its "add a meal" form open, as an ISO date, or null. Only one at
 // a time so the day list doesn't fill up with half-finished forms.
 let isAddingMealOn = null;
+
+// Which bottom tab is showing. Kept in the URL hash so a reload, or a link sent
+// to someone, lands on the same place.
+let activeTab = (window.location.hash || '').replace('#', '') || 'trip';
 
 function card(title, ...children) {
   return el('div', { class: 'card' }, el('h2', {}, title), ...children);
@@ -1219,9 +1224,12 @@ function render(data) {
     const unassigned = packing.filter((p) => !p.assignedTo).length;
     if (unassigned && trip.travellers.length) counts.push(`${unassigned} unassigned`);
 
-    // Kept open across a re-render, otherwise ticking something would fold the
-    // list up under you.
-    const open = document.querySelector('details.packing')?.open ?? false;
+    // Open on its own tab, where the list is the only thing on screen and
+    // folding it away would leave a near-empty page. The live element wins when
+    // there is one, so ticking something off — which re-renders everything —
+    // cannot fold the list up underneath you.
+    const existing = document.querySelector('details.packing');
+    const open = existing ? existing.open : activeTab === 'packing';
 
     sections.push(card('Packing list',
       el('details', { class: 'packing', ...(open ? { open: 'open' } : {}) },
@@ -1362,27 +1370,72 @@ function render(data) {
   // Sections are built in whatever order is convenient above, then arranged
   // here. On a trip that moves around, the route is what you open the page for;
   // money is the follow-up, and the share links matter least once they are sent.
-  const ORDER = ['Trip details', 'Notes', 'Route', 'Day by day', 'Costs', 'Payments',
-    'Things to do', 'Expenses', 'Packing list', 'Places to go', 'Travellers',
-    'Share this trip', 'Access'];
+  // Thirteen sections in one column is a very long scroll on a phone, so they
+  // are grouped behind tabs. The order within each tab is the order below.
+  const TABS = [
+    { id: 'trip', label: 'Trip', icon: '🧭', sections: ['Route', 'Things to do', 'Places to go'] },
+    { id: 'days', label: 'Days', icon: '📅', sections: ['Day by day'] },
+    { id: 'money', label: 'Money', icon: '💰', sections: ['Costs', 'Payments', 'Expenses'] },
+    { id: 'packing', label: 'Packing', icon: '🎒', sections: ['Packing list'] },
+    { id: 'more', label: 'More', icon: '⋯', sections: ['Trip details', 'Notes', 'Travellers', 'Share this trip', 'Access'] },
+  ];
 
-  const rank = (node) => {
-    const heading = node.querySelector('h2');
-    const index = heading ? ORDER.indexOf(heading.textContent) : -1;
-    return index === -1 ? ORDER.length : index;
-  };
+  const tabOf = new Map();
+  for (const tab of TABS) for (const name of tab.sections) tabOf.set(name, tab.id);
 
-  sections.sort((a, b) => rank(a) - rank(b));
+  const titleOf = (node) => node.querySelector('h2')?.textContent ?? '';
 
-  // The share card is the least important thing on the page once the links have
-  // been sent, so it recedes rather than competing with the trip itself.
-  const last = sections[sections.length - 1];
-  const lastHeading = last && last.querySelector('h2');
-  if (lastHeading && (lastHeading.textContent === 'Share this trip' || lastHeading.textContent === 'Access')) {
-    last.classList.add('card-quiet');
+  // Anything without a home lands in More rather than disappearing, so adding a
+  // card and forgetting to list it here is visible instead of silent.
+  const grouped = new Map(TABS.map((t) => [t.id, []]));
+  for (const node of sections) {
+    grouped.get(tabOf.get(titleOf(node)) ?? 'more').push(node);
   }
 
-  content.replaceChildren(...sections);
+  for (const tab of TABS) {
+    const order = tab.sections;
+    grouped.get(tab.id).sort((a, b) => {
+      const ai = order.indexOf(titleOf(a));
+      const bi = order.indexOf(titleOf(b));
+      return (ai === -1 ? order.length : ai) - (bi === -1 ? order.length : bi);
+    });
+  }
+
+  // The share links matter least once they have been sent, so they recede.
+  for (const node of grouped.get('more')) {
+    const title = titleOf(node);
+    if (title === 'Share this trip' || title === 'Access') node.classList.add('card-quiet');
+  }
+
+  if (!grouped.get(activeTab)?.length) activeTab = 'trip';
+
+  const bar = el('nav', { class: 'tabbar', 'aria-label': 'Sections' });
+  for (const tab of TABS) {
+    const count = grouped.get(tab.id).length;
+    const button = el('button', {
+      type: 'button',
+      class: tab.id === activeTab ? 'tab is-active' : 'tab',
+      'aria-current': tab.id === activeTab ? 'page' : 'false',
+      ...(count ? {} : { disabled: 'disabled' }),
+    },
+      el('span', { class: 'tab-icon', 'aria-hidden': 'true' }, tab.icon),
+      el('span', { class: 'tab-label' }, tab.label)
+    );
+
+    button.addEventListener('click', () => {
+      activeTab = tab.id;
+      // replaceState rather than a hash assignment: this should not stack up
+      // history entries that the back button then has to walk through.
+      history.replaceState(null, '', `#${tab.id}`);
+      render(trip);
+      window.scrollTo({ top: 0 });
+    });
+
+    bar.append(button);
+  }
+
+  content.replaceChildren(...grouped.get(activeTab));
+  document.getElementById('tabbar').replaceChildren(bar);
 }
 
 api(`/api/trips/${token}`)
