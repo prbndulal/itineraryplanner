@@ -9,11 +9,11 @@ Plan a trip, track what it costs, and share it with everyone coming along.
 - **Travellers** — who is coming, who paid for what
 - **Costs** — running total, category breakdown, and who owes whom
 - **Day by day** — the trip read along the calendar: where you sleep each night,
-  what is planned, and what it costs
+  what is planned, what it costs, and what you are eating
 - **Settling up** — turns the balances into "X pays Y" so the group can square up
 - **Payments** — record a repayment and watch the debt shrink; never counted as a trip cost
 - **Packing list** — a shared checklist: tick things off and say who is bringing what
-- **Meals** — what you plan to eat on each day, grouped by date
+- **Meals** — planned inside each day of the trip, alongside where you are sleeping
 - **Reordering** — drag a row on a desktop, or use the ↑↓ buttons anywhere
 - **Reports** — a printable per-person statement of what they owe or are owed
 - **Splitting** — each cost can be shared by the whole group or just the people it was for
@@ -150,6 +150,20 @@ stale copy behind. A day's stay is the one where `checkIn <= day < checkOut`:
 half-open, so the day you check out is not a night you slept there. On a road
 trip where one booking ends the morning the next begins, an inclusive comparison
 would put two stays on nearly every day.
+
+**Meals are planned on the day, not in a list of their own.** What to eat is a
+question you ask while looking at a particular day, so the form lives in that
+day and inherits its date rather than asking for one. Everything else in the day
+view is read-only and edited in its own section, which keeps one place per kind
+of thing; meals are the exception because the day *is* their natural home.
+
+**Long sections fold away, and remember whether they were open.** The packing
+list runs to dozens of items, which would otherwise bury everything below it on
+a phone. Collapsed, the summary line still carries the counts — how many are
+packed, who is bringing how many, how many are unclaimed — so the useful part
+needs no expanding. Because every change re-renders the whole page, the open
+state is read back off the existing element first; otherwise ticking something
+off would fold the list up underneath you.
 
 **Done-state is TEXT, like everything else in the table.** Every column is TEXT
 and `cleanText` turns whatever arrives into a string, so a real boolean column

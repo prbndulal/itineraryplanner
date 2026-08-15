@@ -28,6 +28,10 @@ let trip = null;
 // rather than hand-patching the DOM.
 let editing = null;
 
+// Which day has its "add a meal" form open, as an ISO date, or null. Only one at
+// a time so the day list doesn't fill up with half-finished forms.
+let isAddingMealOn = null;
+
 function card(title, ...children) {
   return el('div', { class: 'card' }, el('h2', {}, title), ...children);
 }
@@ -252,9 +256,10 @@ function fieldsFor(collection, cur) {
     return [{ key: 'name', label: 'Item', placeholder: 'Sunscreen' }];
   }
   if (collection === 'meals') {
+    // No date field: a meal is always added from the day it belongs to, so the
+    // form inherits it rather than asking again.
     return [
       { key: 'name', label: 'What are we eating', placeholder: 'Dal bhat' },
-      { key: 'date', label: 'Day', type: 'date' },
       // A datalist, not a fixed set: supper and morning tea are meals too.
       { key: 'slot', label: 'Sitting', list: MEAL_SLOTS, placeholder: 'Dinner' },
       { key: 'location', label: 'Where', placeholder: 'Cairns Airbnb' },
@@ -281,7 +286,10 @@ let formSeq = 0;
 
 // A row of labelled inputs plus a submit button. With `item` it edits that item
 // in place (PATCH); without one it adds a new item (POST).
-function itemForm(collection, { item = null, onCancel = null } = {}) {
+// `defaults` pre-fills a new item — a meal added from a particular day already
+// knows its date. `onDone` replaces the usual re-render when the caller has its
+// own state to clear first.
+function itemForm(collection, { item = null, onCancel = null, defaults = {}, onDone = null } = {}) {
   const fields = fieldsFor(collection, trip.currency);
   const inputs = {};
   const grid = el('div', { class: 'grid' });
@@ -292,7 +300,7 @@ function itemForm(collection, { item = null, onCancel = null } = {}) {
     const input = el('input', {
       type: field.type || 'text',
       placeholder: field.placeholder || '',
-      value: item ? (item[field.key] ?? '') : '',
+      value: item ? (item[field.key] ?? '') : (defaults[field.key] ?? ''),
       ...(field.step ? { step: field.step } : {}),
       // A datalist suggests the usual categories without forbidding a new one.
       ...(listId ? { list: listId } : {}),
@@ -405,7 +413,9 @@ function itemForm(collection, { item = null, onCancel = null } = {}) {
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     errorBox.textContent = '';
-    const body = {};
+    // Defaults first so a value the form has no field for — the date of the day
+    // a meal was added from — still reaches the server. Visible inputs win.
+    const body = { ...defaults };
     for (const [key, input] of Object.entries(inputs)) body[key] = input.value;
     // Always sent, so an existing payer can be reassigned or cleared.
     if (payer) body.paidBy = payer.value;
@@ -430,7 +440,8 @@ function itemForm(collection, { item = null, onCancel = null } = {}) {
         body: JSON.stringify(body),
       });
       editing = null;
-      render(updated);
+      if (onDone) onDone(updated);
+      else render(updated);
     } catch (err) {
       errorBox.textContent = err.message;
       submit.disabled = false;
@@ -895,9 +906,10 @@ function render(data) {
   sections.push(card('Route', ...routeChildren));
 
   // --- Day by day ----------------------------------------------------------
-  // The same trip read along the calendar instead of along the route. Read-only
-  // on purpose: editing lives in Route, Things to do and Expenses, so there is
-  // only ever one place where an item can be changed.
+  // The same trip read along the calendar instead of along the route. Stays,
+  // activities and expenses are shown here but edited in their own sections, so
+  // each of those has one place it can be changed. Meals are the exception:
+  // deciding what to eat is a per-day question, so they are planned here.
   const days = s.days || [];
   if (days.length) {
     const dayList = el('ol', { class: 'journey' });
@@ -925,15 +937,45 @@ function render(data) {
       );
 
       for (const meal of day.meals || []) {
+        if (isEditing('meals', meal.id)) {
+          body.append(editRow('meals', meal));
+          continue;
+        }
+
+        const where = [meal.time, meal.location].filter(Boolean).join(' · ');
         body.append(
           el('div', { class: 'row' },
             el('div', { class: 'row-main' },
               el('div', { class: 'row-title' }, meal.name),
-              meal.location ? el('div', { class: 'row-meta' }, meal.location) : null),
+              where ? el('div', { class: 'row-meta' }, where) : null,
+              meal.notes ? el('div', { class: 'row-meta' }, meal.notes) : null),
             el('div', { class: 'row-side' },
-              meal.slot ? el('span', { class: 'chip-static' }, meal.slot) : null)
+              meal.slot ? el('span', { class: 'chip-static' }, meal.slot) : null,
+              rowActions('meals', meal.id))
           )
         );
+      }
+
+      // Planning food is a per-day decision, so the form belongs on the day
+      // rather than in a list somewhere else that has to be dated by hand.
+      if (trip.canEdit) {
+        if (isAddingMealOn === day.date) {
+          body.append(
+            itemForm('meals', {
+              defaults: { date: day.date },
+              onCancel: () => { isAddingMealOn = null; render(trip); },
+              onDone: (updated) => { isAddingMealOn = null; render(updated); },
+            })
+          );
+        } else {
+          const add = el('button', { type: 'button', class: 'link edit add-meal' }, '+ Add a meal');
+          add.addEventListener('click', () => {
+            isAddingMealOn = day.date;
+            editing = null;
+            render(trip);
+          });
+          body.append(add);
+        }
       }
 
       for (const act of day.activities) {
@@ -964,10 +1006,11 @@ function render(data) {
       dayList.append(el('li', { class: classes.join(' ') }, body));
     }
 
-    // With nothing but stays this is one line per day saying what Route already
-    // says, so it stays folded away until there is more to it.
-    const extras = trip.activities.length + (trip.expenses || []).length + (trip.meals || []).length;
-    const details = el('details', extras > 0 ? { open: 'open' } : {},
+    // Open by default: this is where meals get planned, so folding it away would
+    // hide the thing you came to do. Its state is preserved across re-renders so
+    // adding a meal doesn't close the list you are working in.
+    const dayOpen = document.querySelector('details.days')?.open ?? true;
+    const details = el('details', { class: 'days', ...(dayOpen ? { open: 'open' } : {}) },
       el('summary', {},
         `${days.length} days · ${trip.activities.length} planned, `
         + `${(trip.meals || []).length} meals, ${(trip.expenses || []).length} expenses`),
@@ -1153,93 +1196,40 @@ function render(data) {
     });
   }
 
-  const packChildren = [];
-  if (packing.length) {
-    const done = packing.filter((p) => p.done).length;
-    const summary = el('div', { class: 'chip-row', style: 'margin-bottom:12px' },
-      el('span', { class: 'chip-static' }, `${done} of ${packing.length} packed`));
+  const inner = el('div', {}, packList);
+  if (trip.canEdit) {
+    inner.append(el('div', { style: 'margin-top:16px' }, itemForm('packing')));
+  }
 
-    // Who is carrying how much, so the load can be seen at a glance rather than
-    // by reading down the whole list.
+  if (!packing.length) {
+    sections.push(card('Packing list', inner));
+  } else {
+    // A long list would otherwise push everything else off the page, so it folds
+    // away by default. The counts live in the summary line, which means the
+    // useful part — how much is left and who is carrying it — is readable
+    // without expanding anything.
+    const done = packing.filter((p) => p.done).length;
+    const counts = [`${done} of ${packing.length} packed`];
+
     for (const traveller of trip.travellers) {
       const mine = packing.filter((p) => p.assignedTo === traveller.id);
-      if (!mine.length) continue;
-      const packed = mine.filter((p) => p.done).length;
-      summary.append(el('span', { class: 'chip-static' },
-        `${traveller.name}: ${packed}/${mine.length}`));
+      if (mine.length) counts.push(`${traveller.name} ${mine.filter((p) => p.done).length}/${mine.length}`);
     }
 
     const unassigned = packing.filter((p) => !p.assignedTo).length;
-    if (unassigned && trip.travellers.length) {
-      summary.append(el('span', { class: 'chip-static' }, `${unassigned} unassigned`));
-    }
+    if (unassigned && trip.travellers.length) counts.push(`${unassigned} unassigned`);
 
-    packChildren.push(summary);
+    // Kept open across a re-render, otherwise ticking something would fold the
+    // list up under you.
+    const open = document.querySelector('details.packing')?.open ?? false;
+
+    sections.push(card('Packing list',
+      el('details', { class: 'packing', ...(open ? { open: 'open' } : {}) },
+        el('summary', {}, counts.join(' · ')),
+        el('div', { style: 'margin-top:14px' }, inner)
+      )
+    ));
   }
-  packChildren.push(packList);
-  if (trip.canEdit) {
-    packChildren.push(el('div', { style: 'margin-top:16px' }, itemForm('packing')));
-  }
-  sections.push(card('Packing list', ...packChildren));
-
-  // --- Meals ---------------------------------------------------------------
-  // What you plan to eat, grouped by the day it happens on. Any number of
-  // sittings per day rather than a fixed three, and no cost: money spent on food
-  // belongs in Expenses, which is a different question from what's for dinner.
-  const meals = trip.meals || [];
-  const mealChildren = [];
-
-  if (!meals.length) {
-    mealChildren.push(el('p', { class: 'empty' },
-      trip.canEdit ? 'No meals planned yet.' : 'No meals planned for this trip.'));
-  } else {
-    // Undated meals sort last: they are ideas rather than plans for a given day.
-    const byDay = new Map();
-    meals.forEach((meal, index) => {
-      const key = meal.date || '';
-      if (!byDay.has(key)) byDay.set(key, []);
-      byDay.get(key).push({ meal, index });
-    });
-
-    const keys = [...byDay.keys()].sort((a, b) => (a || '9999').localeCompare(b || '9999'));
-
-    for (const key of keys) {
-      const group = el('div', { style: 'margin-bottom:18px' });
-      group.append(el('label', {}, key ? formatDay(key, { weekday: true, year: true }) : 'Any day'));
-
-      for (const { meal, index } of byDay.get(key)) {
-        if (isEditing('meals', meal.id)) {
-          group.append(editRow('meals', meal));
-          continue;
-        }
-
-        const meta = [meal.time, meal.location].filter(Boolean).join(' · ');
-
-        group.append(makeDraggable(
-          el('div', { class: 'row' },
-            el('div', { class: 'row-main' },
-              el('div', { class: 'row-title' }, meal.name),
-              meta ? el('div', { class: 'row-meta' }, meta) : null,
-              meal.notes ? el('div', { class: 'row-meta' }, meal.notes) : null
-            ),
-            el('div', { class: 'row-side' },
-              meal.slot ? el('span', { class: 'chip-static' }, meal.slot) : null,
-              reorderButtons('meals', meal.id, index, meals.length),
-              rowActions('meals', meal.id))
-          ),
-          'meals',
-          index
-        ));
-      }
-
-      mealChildren.push(group);
-    }
-  }
-
-  if (trip.canEdit) {
-    mealChildren.push(el('div', { style: 'margin-top:16px' }, itemForm('meals')));
-  }
-  sections.push(card('Meals', ...mealChildren));
 
   // --- Payments ------------------------------------------------------------
   // Repayments between travellers. These settle what the Costs card works out;
@@ -1373,7 +1363,7 @@ function render(data) {
   // here. On a trip that moves around, the route is what you open the page for;
   // money is the follow-up, and the share links matter least once they are sent.
   const ORDER = ['Trip details', 'Notes', 'Route', 'Day by day', 'Costs', 'Payments',
-    'Things to do', 'Meals', 'Expenses', 'Packing list', 'Places to go', 'Travellers',
+    'Things to do', 'Expenses', 'Packing list', 'Places to go', 'Travellers',
     'Share this trip', 'Access'];
 
   const rank = (node) => {

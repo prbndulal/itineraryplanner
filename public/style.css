@@ -477,3 +477,25 @@ button.link.move:disabled { opacity: 0.3; cursor: default; }
   /* Comfortably tappable next to the checkbox on a phone. */
   button.link.move { padding: 9px 13px; font-size: 17px; }
 }
+
+/* "Add a meal" sits inside a day, so it reads as part of that day rather than a
+   button bolted to the bottom of the card. */
+button.link.add-meal {
+  margin-top: 8px;
+  padding: 6px 0;
+  font-size: 13px;
+}
+
+/* A collapsed section still has to answer "how far along am I", so the summary
+   line carries the counts and stays readable when nothing is expanded. */
+details.packing > summary,
+details.days > summary {
+  font-variant-numeric: tabular-nums;
+}
+
+details.packing[open] > summary,
+details.days[open] > summary {
+  margin-bottom: 4px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
